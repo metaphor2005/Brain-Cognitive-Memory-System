@@ -111,26 +111,6 @@ Response prompting has been adjusted to feel more like natural human chat:
 
 > Note: backend prompt changes require restarting the backend process to take effect. Frontend static changes take effect after a page refresh.
 
----
-
-## Before Publishing to GitHub (Important)
-
-If this folder is intended as a public repository, avoid uploading local/runtime/personal data:
-
-- `.env` (API keys/secrets)
-- `data/memory.db` (and `*-wal` / `*-shm`, contains real conversation/runtime memory)
-- `data/user_avatar.json` (user-uploaded avatar data)
-- `data/vectors/` (rebuildable vector index cache)
-- `data/persona_snapshots/` (runtime persona snapshots)
-- `__pycache__/`, `.venv/`, `.idea/`, `.ruff_cache/`, `*.pyc`, and other local cache/environment files
-
-Recommended to include:
-- source code (`api/`, `cognitive/`, `web/`, `tests/`, etc.)
-- base persona and seed data (`data/persona/`, `data/corpus/`, `data/README.md`)
-- config/docs (`.env.example`, `.gitignore`, `README.md`, `README.cn.md`, `requirements.txt`, etc.)
-
----
-
 ## Notes
 
 - The persona and UI are Chinese-first; this English README is for usage/development reference.
