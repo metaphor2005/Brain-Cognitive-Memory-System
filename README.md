@@ -175,13 +175,6 @@ python maintenance.py --seed-persona --space jiangyan
 ### `data/corpus/` (recommended to keep)
 Text corpus for retrieval/knowledge augmentation; extend as needed.
 
-### Local runtime data (usually not for public upload)
-- `data/memory.db` (and `*-wal` / `*-shm`): real conversations, memory, beliefs, and runtime state
-- `data/vectors/`: rebuildable vector index cache
-- `data/persona_snapshots/`: runtime persona snapshots
-- `data/user_avatar.json`: user-specific avatar/personal data
-- `logs/`: runtime logs
-
 ---
 
 ## Maintenance (`maintenance.py`)
