@@ -220,29 +220,6 @@ Run additional tests in `tests/` as needed.
 
 ---
 
-## Before Publishing to GitHub (Important)
-
-If you are publishing this as a public repository, carefully review and clean the following:
-
-### Recommended NOT to upload
-- `.env` (API keys/secrets)
-- `data/memory.db`, `data/memory.db-wal`, `data/memory.db-shm` (real conversations/runtime memory)
-- `data/user_avatar.json` (personal data)
-- `data/vectors/` (rebuildable cache)
-- `data/persona_snapshots/` (runtime snapshots)
-- `.venv/`, `__pycache__/`, `.ruff_cache/`, `.idea/`, `*.pyc`, and other environment/cache files
-
-### Recommended to keep
-- source and frontend: `api/`, `cognitive/`, `web/`, `tests/`
-- base persona and corpus: `data/persona/`, `data/corpus/`, `data/README.md`
-- config templates and docs: `.env.example`, `.gitignore`, `README.md`, `README.cn.md`, `requirements.txt`, `docs/`
-
-### Additional notes
-- If the belief star map depends on a local offline 3D engine file (e.g. `web/vendor/3d-force-graph.min.js`), ensure it is included in the published copy; otherwise the star map may fail to load offline.
-- Backend prompt/logic changes require restarting the backend process; frontend static asset updates take effect after a page refresh.
-
----
-
 ## Notes
 
 - The default persona, interaction style, and primary documentation target Chinese usage scenarios.
