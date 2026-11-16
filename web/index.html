@@ -4,18 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>江秀妍</title>
-  <link rel="stylesheet" href="style.css?v=20261111">
+  <link rel="stylesheet" href="style.css?v=20261118m">
 </head>
 <body>
   <div id="app">
     <!-- 最左：图标栏（微信式深色竖栏） -->
     <nav id="rail">
       <div class="rail-top">
-        <div class="rail-icon active" title="聊天">
+        <button class="rail-icon active" id="railChatBtn" title="聊天" aria-label="聊天">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 3C6.9 3 3 6.2 3 10.2c0 2.3 1.3 4.4 3.3 5.8l-.8 3 3.4-1.8c1 .3 2 .4 3.1.4 5.1 0 9-3.2 9-7.2S17.1 3 12 3z"/>
           </svg>
-        </div>
+        </button>
+        <a class="rail-icon" id="railStarBtn" href="/starmap.html" title="记忆宇宙" aria-label="记忆宇宙">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+            <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>
+            <circle cx="12" cy="12" r="7" stroke-opacity="0.7"/>
+          </svg>
+        </a>
       </div>
       <div class="rail-bottom">
         <button class="rail-icon" id="themeToggle" title="深色模式" aria-label="切换深色模式">
@@ -219,6 +226,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261114"></script>
+  <script src="app.js?v=20261118m"></script>
 </body>
 </html>

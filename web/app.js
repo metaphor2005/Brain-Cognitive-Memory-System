@@ -919,6 +919,8 @@ function bindEvents() {
   });
 
   $("#beliefRefreshBtn").addEventListener("click", loadBeliefs);
+
+  // 左栏星图入口是一个普通链接，直接在新页面打开 /starmap.html
   $("#personaFrozenSwitch").addEventListener("change", (e) => {
     setPersonaFrozen(e.target.checked);
   });

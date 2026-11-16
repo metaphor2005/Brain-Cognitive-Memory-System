@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>记忆宇宙 · 江秀妍</title>
+  <link rel="stylesheet" href="starmap.css?v=20261120u19">
+  <script src="vendor/3d-force-graph.min.js"></script>
+</head>
+<body>
+  <div id="starApp">
+    <header class="star-header">
+      <div class="star-header-left">
+        <a class="star-back" href="/" title="返回聊天">← 返回聊天</a>
+        <div class="star-title">记忆宇宙</div>
+        <div class="star-subtitle">8 字星带 · 亮度与速度对应重要程度 · 点击查看</div>
+      </div>
+      <div class="star-header-right">
+        <div id="stats" class="star-stats">正在读取…</div>
+        <button id="toggleLeftBtn" class="star-btn" title="显示/隐藏搜索面板">搜索</button>
+        <button id="toggleRightBtn" class="star-btn" title="显示/隐藏详情面板">详情</button>
+        <button id="refreshBtn" class="star-btn">刷新</button>
+      </div>
+    </header>
+
+    <div class="star-body">
+      <!-- 左侧可隐藏面板：搜索 -->
+      <aside id="leftPanel" class="star-side star-left collapsed">
+        <div class="side-head">
+          <span>搜索</span>
+          <button id="leftCollapse" class="side-collapse" title="收起面板">◀</button>
+        </div>
+        <div class="side-content">
+          <input id="searchInput" type="text" placeholder="搜索信念、往事、经历、人物…" spellcheck="false">
+        </div>
+      </aside>
+
+      <main class="star-stage">
+        <canvas id="skyCanvas" class="sky-canvas"></canvas>
+        <div id="graph" class="star-graph"></div>
+        <canvas id="deepSkyCanvas" class="deep-sky-canvas"></canvas>
+        <div id="starLayer" class="star-layer"></div>
+        <div id="selectedLabel" class="selected-label hidden"></div>
+        <div id="emptyHint" class="star-empty hidden">她还没有可展示的记忆。</div>
+      </main>
+
+      <!-- 右侧可隐藏面板：记忆详情 -->
+      <aside id="detail" class="star-side star-right hidden">
+        <div class="star-detail-head">
+          <span>记忆详情</span>
+          <button id="detailClose" aria-label="关闭">✕</button>
+        </div>
+        <div class="side-content">
+          <div id="detailBody" class="star-detail-body"></div>
+          <div id="detailActions" class="star-detail-actions"></div>
+          <div id="correctionForm" class="correction-form hidden"></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script src="starmap.js?v=20261120u43"></script>
+</body>
+</html>

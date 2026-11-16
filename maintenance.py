@@ -402,6 +402,33 @@ def cmd_backup(keep: int = 10) -> int:
     return 0
 
 
+def cmd_life_plan(db: Database, spaces: List[str], force: bool = False) -> int:
+    """
+    摄入江秀妍的虚拟人生蓝图（事件 → 主题/经验/信念/人格）。
+
+    用法：
+        python maintenance.py --life-plan --space jiangyan
+        python maintenance.py --life-plan --space default --force
+    """
+    from cognitive.life import LifeStore, DEFAULT_PLAN_PATH
+
+    store = LifeStore(db, DEFAULT_PLAN_PATH)
+    report = store.ingest()
+    print(
+        f"[虚拟人生] 空间 {store.space_id}：摄入 {report.get('events')} 个事件、"
+        f"{report.get('topics')} 条主题、{report.get('experiences')} 条经验、{report.get('beliefs')} 条信念"
+    )
+    if report.get("daily"):
+        print(f"[虚拟人生] 日结：成功 / {report.get('substantive')} 实质跃迁")
+    if report.get("event"):
+        print(f"[虚拟人生] 大事沉淀：{report.get('event', {}).get('ok') or report.get('event', {}).get('reason')}")
+    if report.get("life"):
+        print(f"[虚拟人生] 长期摄入：{report.get('life', {}).get('ok') or report.get('life', {}).get('error')}")
+    if report.get("changelog_entries"):
+        print(f"[虚拟人生] 人格变迁日志：{report.get('changelog_entries')} 条")
+    return 0
+
+
 def cmd_reset(db: Database, spaces: List[str]) -> int:
     """
     清空指定空间的运行时记忆（人格回到出厂基线），保留人格原始资产。
@@ -449,6 +476,7 @@ def main() -> int:
     parser.add_argument("--stats", action="store_true", help="打印记忆规模")
     parser.add_argument("--logs", action="store_true", help="打印最近巩固记录")
     parser.add_argument("--prune-snapshots", action="store_true", help="快照冷存")
+    parser.add_argument("--life-plan", action="store_true", help="摄入江秀妍虚拟人生蓝图（事件/主题/经验/信念/人格）")
     parser.add_argument("--seed-persona", action="store_true", help="注入人格的既有记忆（前史/关系网/档案）")
     parser.add_argument("--persona-info", action="store_true", help="打印人格原始数据与运行时数据位置")
     parser.add_argument("--export", default="", metavar="PATH", help="导出记忆与人格为 JSON")
@@ -518,6 +546,8 @@ def main() -> int:
         status |= cmd_logs(db, spaces, limit=args.limit)
     if args.prune_snapshots:
         status |= cmd_prune_snapshots(db, spaces, keep=args.keep)
+    if args.life_plan:
+        status |= cmd_life_plan(db, spaces, force=args.force)
 
     return status
 

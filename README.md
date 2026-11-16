@@ -1,87 +1,49 @@
-# Cognitive Agent
+# Cognitive Agent (Jiang Xiuyan)
 
-A **continuously running Chinese cognitive agent** with layered memory, active archiving, structured beliefs, evolvable persona, and a web visualization UI. Built with pure Python + SQLite, and compatible with DeepSeek or any OpenAI-compatible Chat Completions API.
+A continuously running cognitive agent for Chinese-language interaction, featuring layered memory, active archiving, structured beliefs (confirm/correct/reject with traceability), an evolvable persona, and a web UI. The backend is built with Python + SQLite and works with DeepSeek or any OpenAI-compatible Chat Completions API.
 
 [中文文档](README.cn.md)
 
-> This is not a chatbot with a vector database bolted on. Each conversation turn goes through a cognitive pipeline (session/context handling, memory routing, belief extraction/update, persona/relationship state updates, retrieval when needed, and response generation). Beliefs can be confirmed, corrected, superseded, and audited. The frontend provides a WeChat-style chat UI, memory views, and a 3D belief star map.
+> This is not a chatbot with a vector database bolted on. Each conversation turn goes through a cognitive pipeline: session/context handling, memory recall and routing, belief extraction and updates, persona/relationship state changes, retrieval when needed, and response generation. Beliefs support source tracking and audit history. The frontend provides chat, memory inspection, and a 3D belief star map.
 
 ---
 
-## Current Persona
+## Persona
 
-**Current persona: 江秀妍 (nickname: "小苹果" / Little Apple)**
+**Current persona: 江秀妍 (nickname: “小苹果” / Little Apple)**
 
-- 18-year-old freshman, Class 1 (2026), Computer Science and Technology, School of Computer Science, Northeast Electric Power University
+- 18-year-old freshman (Class of 2026), Computer Science and Technology, School of Computer Science, Northeast Electric Power University
 - From Jishou, Xiangxi, Hunan; speaks Mandarin with a slight Xiangxi accent
-- Profile highlights: 160 cm, round face, a small mole under her right eye; enjoys cosplay (mainly *Arknights*, likes Ch'en and Exusiai), likes *A Silent Voice*, loves spicy food, and has a calico cat named "辣椒" (Chili)
-- Personality: outwardly gentle and polite, tends to acknowledge emotions before responding; inwardly stubborn and observant. When dismissed or forced into decisions, she becomes quiet but more specific. She has emotions and boundaries rather than a customer-service tone.
+- Profile highlights: 160 cm, round face, a small mole under her right eye; enjoys cosplay (mainly *Arknights*, likes Ch'en and Exusiai), likes *A Silent Voice*, loves spicy food, and has a calico cat named “辣椒” (Chili)
+- Personality: outwardly gentle and polite, tends to acknowledge emotions before responding; inwardly stubborn, observant, and detail-oriented. When dismissed or pressured into decisions, she becomes quiet but more specific. She has emotions and boundaries rather than a customer-service tone.
 
-Base persona assets and initial seed/backstory beliefs live in `data/persona/`: `profile.json`, `kernel.json`, `meta.json`, `seed.json`, and `avatar.jpg`.  
-The project loads these base assets through `config.py` / persona-loading logic. When needed (e.g. first run or missing usable memory DB), initial backstory/beliefs can be seeded from `seed.json`.
-
----
-
-## Current Status & Release Notes
-
-- **Project form**: Python backend + web frontend (`web/`) + SQLite persistence (`data/`)
-- **Common memory spaces**: `default` / `jiangyan` (depending on runtime args and data)
-- **Base persona data**: included in `data/persona/` and intended to be kept in the repository
-- **Runtime data**: `data/memory.db`, `data/vectors/`, `data/persona_snapshots/`, `data/user_avatar.json`, etc. are local runtime/personal artifacts and should be handled carefully before publishing to GitHub (see “Before Publishing to GitHub” below)
+Base persona assets and seed data live in `data/persona/` (`profile.json`, `kernel.json`, `meta.json`, `seed.json`, `avatar.jpg`). Additional virtual-life/backstory materials can be found in `docs/virtual-life/` and `data/virtual-life/`.
 
 ---
 
-## What It Can Do
+## Key Features
 
-### 1. Layered Memory and Cognitive Replies
+### Layered Memory & Cognitive Replies
 - **Conversation context**: keeps recent turns for response generation.
-- **Topic/experience memory**: archives and consolidates conversation content for later recall.
-- **Structured beliefs (KG)**: extracts key information into queryable/updatable belief records (subject/relation/object, confidence, importance, status, source, etc.).
-- **Persona and self-view**: persona parameters/tendencies and self-narrative influence responses and behavior.
-- **Retrieval when needed**: supplements context/memory through retrieval flows when existing material is insufficient (subject to implementation/config).
+- **Topic/experience memory**: archives events and conversation content for later recall.
+- **Structured beliefs (knowledge graph)**: extracts key information into queryable, updatable records (subject/relation/object, confidence, importance, status, source, etc.).
+- **Persona & self-view**: persona parameters and self-narrative influence responses and can evolve over time.
+- **Retrieval when needed**: supplements context/memory when available information is insufficient (depending on implementation/config).
 
-### 2. Belief Management: Confirm, Conflict, Correct, and Audit
+### Belief Management & Audit
 - Beliefs can be updated, coexist, or be superseded/rejected as new information arrives (depending on relation semantics and rules).
-- Supports **user confirmation, correction, and rejection**, with source tracking and audit records.
-- Supports **manual write-in of correct beliefs**:
-  - available from memory views or the belief star-map detail panel;
-  - allows editing subject/relation/object and confidence/importance;
-  - can replace/supersede an existing belief (old belief is marked superseded/deactivated while history is preserved);
-  - manual corrections are recorded as user-corrected (e.g. `user_corrected`).
+- Supports **confirm, correct, and reject** actions with source tracking and audit records.
+- Supports **manual belief edits/writes** (subject, relation, object, confidence/importance). Superseded beliefs can be deactivated while history is preserved.
 
-### 3. 3D Belief Star Map (Web Visualization)
-- **Layout**: radial structure `core → category hubs → beliefs`; category hubs are distributed around the center (including top/bottom placement).
-- **Full visibility**: all beliefs are displayed, including superseded/deactivated ones (distinguished by status/style).
-- **Spatial meaning (using existing parameters)**: no separate “forgetting score” UI parameter is shown. Placement is derived from existing fields such as **importance, confidence, and status/active state**:
-  - closer to center: generally more important and/or more certain;
-  - farther out: generally less important, or no longer active/superseded/rejected.
-- **Visuals and interaction**:
-  - star-like node colors with nebula/starfield background;
-  - on hover highlight, non-focused elements are only lightly dimmed for readability;
-  - supports drag-to-rotate, zoom, search/fly-to, reset view, auto-rotate, category filtering;
-  - click nodes for details and manually correct beliefs from the detail panel.
+### 3D Memory Universe (Web Visualization)
+- **Structure**: all memory stars are distributed fairly evenly along a **figure-eight (infinity) star stream** and continuously move along the stroke order of the 8; the two star bands twist in 3D and separate at the crossing instead of overlapping in the same plane.
+- **Coverage**: not just beliefs, but **topics (past events), experiences, entities (people/things), persona versions, persona changes, moods, and relationship affection** — every memory type that can be expressed visually.
+- **Visual mapping**: stars use a fixed absolute size; **higher importance means higher brightness and faster motion**; the slowest completes a lap in about 4 minutes and the fastest in about 2 minutes; colors are low-saturation type tints, keeping the cold gray/blue feel of a real starfield.
+- **Interaction**: drag to rotate, zoom, auto-rotate, and search; click any star for details (topics show related experiences/beliefs, entities show related beliefs, beliefs can be confirmed/corrected/rejected).
 
-### 4. More Natural, In-Character Replies
-- Response prompting has been tuned for a more human conversational style:
-  - follows the user’s message naturally instead of producing report-style replies every time;
-  - more conversational tone with flexible length and pacing;
-  - avoids template-like phrases and rigid bullet-pointing unless explicitly requested.
-- Core constraints remain:
-  - grounded in memory/context, no fabricated details;
-  - superseded/deactivated beliefs are not treated as current conclusions;
-  - uncertainty is stated clearly when details are not remembered;
-  - stays consistent with 江秀妍’s persona, emotions, and boundaries.
-
-> Note: after changing backend prompts (e.g. `cognitive/cognition/prompts.py`), restart the backend process for new replies to take effect. Frontend static changes apply after a page refresh.
-
-### 5. Persona, Relationship, and Proactive Mechanisms (Implementation/Config Dependent)
-- Persona kernel/state participates in responses and evolution.
-- Affection/relationship warmth and related states are tracked and surfaced (as implemented in the current version).
-- Proactive contact features and preferences (enablement, quiet hours/rhythm, etc.) are supported depending on the current API/UI implementation.
-
-### 6. Web UI and API
-- Web UI: chat, settings, memory inspection, belief star map, etc.
-- HTTP API: message handling, state/memory/settings access, and belief operations (see `api/server.py` and actual routes).
+### Web UI & API
+- Web UI: chat, settings, memory inspection, memory universe, etc.
+- HTTP API: messaging, state/memory/settings access, and belief operations (see `api/server.py` for routes).
 
 ---
 
@@ -89,18 +51,16 @@ The project loads these base assets through `config.py` / persona-loading logic.
 
 ### 1. Requirements
 - Python 3.10+ (3.11/3.12 recommended)
-- Windows / Linux / macOS (development and validation have been done mostly on Windows)
 - A model API key (e.g. DeepSeek or an OpenAI-compatible provider)
 
-### 2. Install Dependencies
-Use a virtual environment if possible:
+Install dependencies (preferably in a virtual environment):
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure `.env`
-Copy `.env.example` to `.env` and fill in your settings (example):
+### 2. Configuration
+Copy `.env.example` to `.env` and fill in your settings, for example:
 
 ```ini
 DEEPSEEK_API_KEY=your_api_key_here
@@ -109,30 +69,27 @@ MODEL_NAME=deepseek-flash
 LLM_MODE=api
 ```
 
-Other tunables (depending on `config.py` / `.env.example`) may include temperatures, token limits, timeout/retry settings, and path overrides (e.g. `DB_PATH`, `VECTOR_DIR`).
+Other tunables (temperature, max tokens, timeout/retry, path overrides such as `DB_PATH`, `VECTOR_DIR`, etc.) are defined in `config.py` and `.env.example`.
 
-> `.env` contains secrets and local configuration. **Do not commit it to GitHub.**
+### 3. Run
 
-### 4. Run the Project
-
-#### Option A: CLI entry
+**CLI entry:**
 ```bash
 python run.py
 ```
-`run.py` provides a CLI/debug entry point (supports args such as `--space`, `--session`, `--debug`, `--state`; refer to the script for exact behavior).
+Common options include `--space`, `--session`, `--debug`, `--state` (refer to the script for exact behavior).
 
-#### Option B: Start the Web/API service
-The project includes `api/server.py` (Flask) for the web UI and HTTP APIs. Run the service using your preferred workflow (direct script execution or your existing launcher/wrapper), then open the web UI in a browser.
-
-> The recommended startup command may vary by environment; use the project’s actual scripts/entry points if you have a fixed workflow.
-
-### 5. First Run / Seed Persona Backstory (Optional)
-Base persona and initial seed beliefs live in `data/persona/seed.json`.  
-To manually inject/reseed initial backstory beliefs (idempotency depends on implementation), use:
-
+**Web UI / API server:**
 ```bash
-python maintenance.py --seed-persona --space jiangyan
+python api/server.py
 ```
+or
+```bash
+python -m api.server
+```
+Then open `http://127.0.0.1:8000/` (belief star map: `/starmap.html`).
+
+> After changing backend prompts or Python logic, restart the server. Frontend static changes take effect after a page refresh.
 
 ---
 
@@ -141,79 +98,67 @@ python maintenance.py --seed-persona --space jiangyan
 ```text
 .
 ├─ api/                  # HTTP API / web service
-├─ cognitive/            # Core cognition (prompts, memory, beliefs, persona, retrieval, orchestration, etc.)
-├─ web/                  # Frontend UI (chat, settings, memory, belief star map)
+├─ cognitive/            # Core cognition (memory, beliefs, persona, retrieval, prompts, orchestration)
+├─ web/                  # Frontend UI (chat, settings, memory, memory universe)
 ├─ data/
 │  ├─ persona/           # Base persona assets and seed data (profile/kernel/meta/seed/avatar)
 │  ├─ corpus/            # Corpus/knowledge texts
-│  └─ README.md          # Notes for the data directory
-├─ docs/                 # Documentation
+│  ├─ virtual-life/      # Structured virtual-life data
+│  ├─ persona_snapshots/ # Persona snapshots (runtime/consolidation output)
+│  ├─ vectors/           # Vector index
+│  └─ memory.db          # SQLite database (created/updated at runtime)
+├─ docs/                 # Documentation (including virtual-life materials)
+├─ scripts/              # Utility scripts (e.g. backstory ingestion, snapshot generation)
 ├─ tests/                # Tests and smoke checks
 ├─ config.py             # Global configuration
 ├─ run.py                # CLI entry point
-├─ demo.py               # Demo/example script (if used)
-├─ maintenance.py        # Maintenance tools (stats, daily consolidation, snapshot pruning, seed, etc.)
-├─ requirements.txt      # Dependencies
-├─ .env.example          # Environment variable template
-├─ README.cn.md
-└─ README.md
+├─ maintenance.py        # Maintenance tools
+├─ requirements.txt
+├─ .env.example
+├─ README.md
+└─ README.cn.md
 ```
 
-> Runtime may also create `data/memory.db`, `data/vectors/`, `data/persona_snapshots/`, `logs/`, and other local artifacts.
-
 ---
 
-## Data and Persona Notes
+## Maintenance & Scripts
 
-### `data/persona/` (recommended to keep in the repo)
-- `profile.json`: identity, personality, relationships, preferences, etc.
-- `kernel.json`: initial persona kernel/parameters
-- `meta.json`: persona metadata
-- `seed.json`: initial backstory and belief seed data (for cold start/seeding)
-- `avatar.jpg`: default avatar asset
-
-### `data/corpus/` (recommended to keep)
-Text corpus for retrieval/knowledge augmentation; extend as needed.
-
----
-
-## Maintenance (`maintenance.py`)
-
-Common commands (refer to the script for exact behavior):
+`maintenance.py` provides common maintenance operations (see the script for exact arguments):
 
 ```bash
-# Daily consolidation (per space / all spaces as implemented)
+# Daily consolidation
 python maintenance.py --daily
 python maintenance.py --daily --space jiangyan
 
-# Show stats
+# Stats / persona & data path info
 python maintenance.py --stats
+python maintenance.py --persona-info
 
 # Prune old snapshots (keep recent N)
 python maintenance.py --prune-snapshots --keep 30
-
-# Show persona/data path info
-python maintenance.py --persona-info
 
 # Seed initial persona backstory/beliefs
 python maintenance.py --seed-persona --space jiangyan
 ```
 
+Additional helper scripts are available under `scripts/` (for example, backstory ingestion and snapshot generation).
+
 ---
 
-## Testing and Verification
+## Testing
 
-The project includes test scripts (e.g. `tests/smoke_test.py`). On Windows PowerShell, UTF-8 output is recommended for Chinese text:
+On Windows PowerShell, use UTF-8 output for readable Chinese text:
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'; py tests/smoke_test.py
 ```
 
-Run additional tests in `tests/` as needed.
+Run other tests in `tests/` as needed.
 
 ---
 
 ## Notes
 
-- The default persona, interaction style, and primary documentation target Chinese usage scenarios.
-- This English README is for developers and users; it does not change the persona’s in-character Chinese expression.
+- The default persona, interaction style, and primary content target Chinese-language scenarios.
+- Response quality depends on the model, configuration, and current memory/belief state. When information is missing, the system should state uncertainty rather than fabricate details.
+- Runtime data (database, vector index, snapshots, avatars, etc.) changes over time; handle it appropriately when sharing or migrating the project.

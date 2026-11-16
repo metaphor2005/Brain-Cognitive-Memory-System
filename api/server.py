@@ -22,6 +22,7 @@ Web UI（web/index.html）由本服务直接托管，开箱即用。
     GET  /api/sessions                  # 会话列表（?space_id=）
     GET  /api/sessions/<sid>/messages   # 某会话完整消息历史
     GET  /api/memory/overview           # 记忆总览
+    GET  /api/memory/universe           # 记忆宇宙（信念/往事/经历/实体/变迁/情绪/关系）
     GET  /api/relations                 # 信念（KG 关系）列表
     GET  /api/topics                    # 主题列表
     GET  /api/persona                   # 人格状态
@@ -62,6 +63,7 @@ state_settings = settings
 
 from cognitive.engine import CognitiveAgent
 from cognitive.llm import DeepSeekClient, LLMError
+from cognitive.persona.changelog import PersonaChangelogStore
 from cognitive.persona.kernel import PersonaKernel
 from cognitive.storage.affection_store import (
     ProactivePolicyStore,
@@ -858,12 +860,158 @@ def memory_beliefs():
     )
 
 
+@app.get("/api/memory/universe")
+def memory_universe():
+    """
+    记忆宇宙：把可表达的记忆统一导出，供星图/宇宙可视化使用。
+
+    覆盖：结构化信念、主题（往事）、经验片段、实体、人格变迁、
+    情景状态与好感度关系。前端按重要程度映射星体大小与亮度。
+
+    query:
+        space_id?  默认 default
+        limit?     单类上限（默认 2000）
+    """
+    space_id = request.args.get("space_id") or "default"
+    limit = max(10, min(5000, int(request.args.get("limit") or 2000)))
+    agent = get_agent()
+    agent.ensure_space(space_id)
+
+    kg = KGStore(agent.db)
+    beliefs = kg.list_beliefs(space_id, only_active=False, limit=limit)
+    topics = TopicStore(agent.db).list_topics(space_id, limit=limit)
+
+    conn = agent.db.conn()
+    exp_rows = conn.execute(
+        """
+        select exp_id, topic_id, content, create_ts
+        from experience
+        where space_id = ?
+        order by create_ts desc
+        limit ?
+        """,
+        (space_id, limit),
+    ).fetchall()
+    experiences = [
+        {
+            "exp_id": row["exp_id"],
+            "topic_id": row["topic_id"] or "",
+            "content": row["content"] or "",
+            "create_ts": int(row["create_ts"] or 0),
+        }
+        for row in exp_rows
+    ]
+
+    entity_rows = kg.list_entities(space_id)
+    entities = []
+    for row in entity_rows:
+        try:
+            attrs = json.loads(row["attrs"] or "{}")
+        except (ValueError, TypeError):
+            attrs = {}
+        entities.append(
+            {
+                "eid": row["eid"],
+                "etype": row["etype"] or "Other",
+                "name": row["name"] or "",
+                "attrs": attrs,
+            }
+        )
+
+    changelog = PersonaChangelogStore(agent.db, space_id).query(limit=min(limit, 500))
+    changes = [
+        {
+            "log_id": c.log_id,
+            "topic_id": c.topic_id,
+            "field": c.persona_field,
+            "old": c.old_value,
+            "new": c.new_value,
+            "reason": c.reason,
+            "source_type": c.source_type,
+            "snapshot_from": c.snapshot_from,
+            "snapshot_to": c.snapshot_to,
+            "create_ts": c.create_ts,
+        }
+        for c in changelog
+    ]
+
+    # 人格快照：顶层叙事版本，也作为一类"记忆"进入宇宙
+    snapshots = []
+    snapshot_dir = Path(config.SNAPSHOT_DIR) / space_id
+    if snapshot_dir.exists():
+        for path in sorted(snapshot_dir.glob("v*_*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            snapshots.append(
+                {
+                    "version": int(payload.get("version") or 0),
+                    "self_view": payload.get("self_view") or "",
+                    "narrative": payload.get("narrative") or "",
+                    "topic_id": payload.get("topic_id") or "",
+                    "create_ts": int(payload.get("create_ts") or 0),
+                }
+            )
+
+    kernel = PersonaKernel(agent.db, space_id)
+    moods = [
+        {"mode": mode, "intensity": float(value)}
+        for mode, value in (kernel.get_moods() or {}).items()
+    ]
+    affection = agent.affection_state(space_id)
+
+    # 直接读 persona_meta，避免依赖旧库中可能缺失的扩展列（如 persona_frozen）
+    meta_row = conn.execute(
+        "select current_version, persona_name from persona_meta where space_id = ?",
+        (space_id,),
+    ).fetchone()
+    core_name = (meta_row["persona_name"] if meta_row else "") or config.PERSONA_NAME
+    core_version = int((meta_row["current_version"] if meta_row else 0) or 0)
+
+    counts = {
+        "beliefs": len(beliefs),
+        "topics": len(topics),
+        "experiences": len(experiences),
+        "entities": len(entities),
+        "changes": len(changes),
+        "snapshots": len(snapshots),
+        "moods": len(moods),
+        "affection": len(affection),
+    }
+    return jsonify(
+        {
+            "ok": True,
+            "space_id": space_id,
+            "generated_ts": int(time.time()),
+            "core": {
+                "name": core_name,
+                "version": core_version,
+                "self_view": "",
+            },
+            "stats": {**counts, "total": sum(counts.values())},
+            "beliefs": beliefs,
+            "topics": [t.to_dict() for t in topics],
+            "experiences": experiences,
+            "entities": entities,
+            "changes": changes,
+            "snapshots": snapshots,
+            "moods": moods,
+            "affection": affection,
+        }
+    )
+
+
 @app.post("/api/memory/beliefs/update")
 def memory_belief_update():
     """
-    用户纠正信念。
+    用户确认 / 纠正 / 否决信念。
 
-    body: {"space_id"?, "rid", "action": "confirm|correct|reject", "note"?}
+    body:
+        {"space_id"?, "rid", "action": "confirm|correct|reject", "note"?}
+        手动纠正时额外传：
+        {"head": 主语, "rel": 关系, "tail": 宾语,
+         "confidence"?: 0~1, "importance"?: 0~1}
     """
     body = _body()
     space_id = str(body.get("space_id") or "default").strip() or "default"
@@ -877,6 +1025,37 @@ def memory_belief_update():
     agent = get_agent()
     agent.ensure_space(space_id)
     kg = KGStore(agent.db)
+
+    # 手动纠正：用户填写了新的主语/关系/宾语 → 替换旧信念并保留历史
+    if action == "correct" and any(
+        str(body.get(key) or "").strip() for key in ("head", "rel", "tail")
+    ):
+        def _float_or_none(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        result = kg.replace_belief(
+            space_id,
+            rid,
+            head=str(body.get("head") or "").strip(),
+            rel=str(body.get("rel") or "").strip(),
+            tail=str(body.get("tail") or "").strip(),
+            confidence=_float_or_none(body.get("confidence")),
+            importance=_float_or_none(body.get("importance")),
+            note=note,
+        )
+        if not result.get("updated"):
+            return _fail("纠正内容不完整或信念不存在", 404)
+        return jsonify(
+            {
+                "ok": True,
+                "belief": kg.get_belief(space_id, result["rid"]),
+                **result,
+            }
+        )
+
     result = kg.update_belief(space_id, rid, action=action, note=note)
     if not result.get("updated"):
         return _fail("信念不存在", 404)
@@ -1200,38 +1379,67 @@ def save_settings() -> None:
         print(f"[设置] 落盘失败：{type(exc).__name__}: {exc}")
 
 
-def _check_origin(allowed: tuple) -> None:
+def _check_origin(allowed: tuple):
     """来源白名单：默认只允许本地来源，公网请求直接拒绝（防止误用）。"""
     if not allowed:
-        return
-    allowed_set = set(allowed)
-    origin = request.headers.get("Origin", request.headers.get("x-origin", "")).split(",")[0].strip()
-    if not origin or origin not in allowed_set:
-        return
-    _fail(f"来源不在白名单：{origin}", 403)
+        return None
+    allowed_set = {str(item).strip().lower() for item in allowed if str(item).strip()}
+    origin = request.headers.get("Origin", request.headers.get("X-Origin", ""))
+    origin = origin.split(",")[0].strip() if origin else ""
+    if not origin:
+        return None
+
+    from urllib.parse import urlparse
+
+    host = (urlparse(origin).hostname or origin).strip().lower()
+    if origin.lower() in allowed_set or host in allowed_set:
+        return None
+    return _fail(f"来源不在白名单：{origin}", 403)
 
 
-@app.middleware("before_request")
+@app.before_request
 def _apply_protection():
     """在请求进入路由前做来源与限流检查（可选鉴权由 _check_api_token 负责）。"""
-    _check_origin(config.PRIVACY_ALLOWED_ORIGINS)
-    _check_rate_limit()
+    path = request.path or ""
+    # 静态资源与页面入口不参与限流，避免本地 UI 正常刷新被误伤
+    if (
+        request.method in ("GET", "HEAD")
+        and (
+            path == "/"
+            or path.startswith("/vendor/")
+            or path.endswith(".js")
+            or path.endswith(".css")
+            or path.endswith(".html")
+            or path.endswith(".map")
+            or path.startswith("/api/health")
+            or path.startswith("/api/avatar/")
+        )
+    ):
+        return None
+    blocked = _check_origin(config.PRIVACY_ALLOWED_ORIGINS)
+    if blocked is not None:
+        return blocked
+    # 高频只读轮询/读取接口不计入限流（避免本地 UI 超限）；写操作与聊天仍受保护
+    if request.method in ("GET", "HEAD"):
+        return None
+    return _check_rate_limit()
 
 
 _RATE_BUCKETS: Dict[str, list] = {}
 
 
-def _check_rate_limit() -> None:
+def _check_rate_limit():
     """简单滑动窗口限流：同一来源每分钟最多 RATE_LIMIT_MAX 次。"""
     if not config.RATE_LIMIT_MAX or config.RATE_LIMIT_MAX <= 0:
-        return
+        return None
     key = request.remote_addr or "local"
     now = time.time()
     bucket = [t for t in _RATE_BUCKETS.get(key, []) if now - t < 60]
     if len(bucket) >= int(config.RATE_LIMIT_MAX):
-        _fail("请求过于频繁，请稍后再试", 429)
+        return _fail("请求过于频繁，请稍后再试", 429)
     bucket.append(now)
     _RATE_BUCKETS[key] = bucket
+    return None
 
 
 # ------------------------------------------------------------

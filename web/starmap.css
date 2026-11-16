@@ -1,0 +1,310 @@
+/* ============================================================
+   记忆宇宙 · 独立页面
+   ============================================================ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+:root {
+  --bg: #04060d;
+  --panel: rgba(14, 19, 34, 0.92);
+  --border: rgba(160, 190, 255, 0.16);
+  --text: #e8ecff;
+  --text-sub: #9aa6c4;
+  --accent: #7fd3ff;
+  --danger: #ff7b7b;
+}
+
+html, body {
+  height: 100%;
+  background:
+    radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,0.75), transparent 55%),
+    radial-gradient(1px 1px at 78% 12%, rgba(200,220,255,0.6), transparent 55%),
+    radial-gradient(1px 1px at 34% 72%, rgba(255,255,255,0.5), transparent 55%),
+    radial-gradient(1px 1px at 88% 64%, rgba(190,210,255,0.65), transparent 55%),
+    radial-gradient(1px 1px at 55% 88%, rgba(255,255,255,0.5), transparent 55%),
+    radial-gradient(1px 1px at 8% 88%, rgba(190,210,255,0.5), transparent 55%),
+    radial-gradient(ellipse at 50% 35%, #101a33 0%, #060914 55%, #030409 100%);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  overflow: hidden;
+}
+
+#starApp { height: 100vh; display: flex; flex-direction: column; }
+
+.star-header {
+  min-height: 62px; flex-shrink: 0; padding: 8px 20px;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(9, 13, 24, 0.72);
+  backdrop-filter: blur(8px);
+}
+.star-header-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.star-header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.star-back {
+  color: var(--accent); text-decoration: none; font-size: 13px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 6px; white-space: nowrap;
+}
+.star-back:hover { background: rgba(127, 211, 255, 0.1); }
+.star-title { font-size: 16px; font-weight: 600; white-space: nowrap; }
+.star-subtitle { font-size: 12px; color: var(--text-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.star-btn {
+  background: transparent; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 14px; font-size: 12px; cursor: pointer;
+}
+.star-btn:hover { background: rgba(127, 211, 255, 0.1); }
+.star-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 左右两栏：可隐藏的筛选/图例与详情面板 */
+.star-body { flex: 1; min-height: 0; display: flex; }
+.star-side {
+  flex-shrink: 0; display: flex; flex-direction: column;
+  background: rgba(9, 13, 24, 0.72);
+  border-right: 1px solid var(--border);
+  transition: width 0.22s ease, opacity 0.18s ease;
+  overflow: hidden;
+}
+.star-left { width: 240px; }
+.star-left.collapsed { width: 0; border-right: none; opacity: 0; }
+.star-right {
+  width: 320px; border-right: none; border-left: 1px solid var(--border);
+  background: var(--panel); backdrop-filter: blur(8px);
+}
+.star-right.hidden { display: none; }
+.side-head {
+  height: 42px; flex-shrink: 0; padding: 0 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-sub);
+}
+.side-collapse, .star-detail-head button {
+  background: transparent; border: 0; color: var(--text-sub); cursor: pointer;
+  font-size: 13px; padding: 4px 6px; border-radius: 4px;
+}
+.side-collapse:hover, .star-detail-head button:hover { background: rgba(127, 211, 255, 0.1); color: var(--text); }
+.side-content { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.side-content input[type="text"], .side-content select {
+  width: 100%; font-size: 13px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: rgba(16, 22, 38, 0.9); color: var(--text); outline: none;
+}
+.side-content input[type="text"]:focus, .side-content select:focus { border-color: var(--accent); }
+.star-btn.active { background: rgba(127, 211, 255, 0.16); border-color: var(--accent); color: #dff4ff; }
+
+.star-stats { font-size: 12px; color: var(--text-sub); margin-right: 12px; white-space: nowrap; }
+.star-stats b { color: var(--text); font-weight: 500; }
+
+.star-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 28% 30%, rgba(54, 88, 170, 0.10), transparent 55%),
+    radial-gradient(ellipse at 72% 70%, rgba(80, 80, 130, 0.07), transparent 58%),
+    radial-gradient(ellipse at 50% 50%, rgba(18, 28, 54, 0.24), transparent 70%),
+    #02040a;
+}
+.star-stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  box-shadow: inset 0 0 180px rgba(0, 0, 0, 0.78);
+}
+.sky-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.star-graph { position: absolute; inset: 0; z-index: 0; }
+.star-graph canvas { display: block; }
+.deep-sky-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 3d-force-graph 自带的加载提示/操作提示会盖住星图，统一隐藏 */
+.graph-info-msg, .scene-nav-info, .scene-tooltip { display: none !important; }
+
+/* 星点覆盖层：3D 只负责布局与连线，星点用 HTML/CSS 绘制，避免球体感 */
+.star-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.star-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, #eef2f8 0%, #eef2f8 34%, var(--c, #9fb3c8) 58%, var(--c0, rgba(159,179,200,0)) 78%);
+  box-shadow:
+    0 0 var(--glow, 10px) var(--c, #8fd3ff),
+    0 0 var(--glow2, 26px) var(--c, #8fd3ff);
+  opacity: var(--a, 0.8);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: opacity 0.2s, filter 0.2s;
+}
+.star-node:hover { filter: brightness(1.45); opacity: 0.9; }
+
+/* 扩大点击热区，不改变星点视觉大小 */
+.star-node::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
+
+/* 高重要度星体的十字星芒 */
+.star-node.spike::before,
+.star-node.spike::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 260%;
+  height: 1px;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(90deg, transparent, var(--c, #8fd3ff), transparent);
+  opacity: 0.55;
+  pointer-events: none;
+}
+.star-node.spike::after { transform: translate(-50%, -50%) rotate(90deg); }
+.star-node.giant::before { width: 360%; opacity: 0.8; }
+.star-node.giant::after { width: 360%; opacity: 0.8; }
+
+.star-node.core {
+  z-index: 6;
+  background: radial-gradient(circle, #f4efdf 0%, #e8dcb8 28%, #cdbb8f 50%, rgba(180, 160, 110, 0) 76%);
+  box-shadow: 0 0 8px rgba(220, 205, 165, 0.55), 0 0 28px rgba(200, 180, 130, 0.25), 0 0 70px rgba(180, 150, 90, 0.12);
+  opacity: 1;
+}
+.star-node.domain {
+  z-index: 5;
+  background: radial-gradient(circle, #ffffff 0%, var(--c, #8fd3ff) 30%, var(--c0, rgba(143,211,255,0)) 72%);
+  box-shadow: 0 0 10px var(--c, #8fd3ff), 0 0 34px var(--c, #8fd3ff);
+  opacity: 0.95;
+}
+.star-node.hub {
+  z-index: 4;
+  background: radial-gradient(circle, #ffffff 0%, var(--c, #6f9fd8) 36%, var(--c0, rgba(111,159,216,0)) 74%);
+  box-shadow: 0 0 7px var(--c, #6f9fd8), 0 0 24px var(--c, #6f9fd8);
+  opacity: 0.9;
+}
+
+/* 星系盘内的暗星（不参与点击） */
+.star-dust {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 3px currentColor;
+}
+.core-halo {
+  position: absolute;
+  width: 440px;
+  height: 440px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(214, 205, 180, 0.20) 0%, rgba(180, 165, 130, 0.08) 28%, rgba(140, 120, 90, 0.03) 52%, rgba(140, 120, 90, 0) 70%);
+  filter: blur(4px);
+  opacity: 0.9;
+}
+
+.selected-label {
+  position: absolute;
+  z-index: 4;
+  transform: translate(-50%, 10px);
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(4, 8, 18, 0.78);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: #dbe8ff;
+  pointer-events: none;
+}
+.selected-label.hidden { display: none; }
+.star-node.inactive { filter: grayscale(1); opacity: 0.3; box-shadow: none; }
+.star-node.inactive::before, .star-node.inactive::after { display: none; }
+.star-node.dim { opacity: 0.2; filter: grayscale(0.35); }
+.star-node.selected {
+  outline: 1px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 6px;
+  z-index: 3;
+}
+.star-node.hidden-star { display: none; }
+
+.star-detail.hidden { display: none; }
+.star-detail-head {
+  height: 42px; flex-shrink: 0; padding: 0 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600;
+}
+.star-detail-body { font-size: 12px; line-height: 1.7; color: #c7d0f0; word-break: break-word; }
+.star-breadcrumb { font-size: 11px; color: var(--text-sub); margin-bottom: 8px; }
+.star-neighbors { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.star-neighbors-title { font-size: 11px; color: var(--text-sub); margin-bottom: 6px; }
+.star-neighbor {
+  display: block; width: 100%; text-align: left; margin: 4px 0; padding: 5px 8px;
+  background: rgba(127, 211, 255, 0.06); color: #dbe6ff; border: 1px solid var(--border);
+  border-radius: 6px; font-size: 11px; cursor: pointer; line-height: 1.4;
+}
+.star-neighbor:hover { background: rgba(127, 211, 255, 0.14); }
+.star-detail-body .kv { margin: 5px 0; }
+.star-detail-body .kv b { color: #fff; font-weight: 500; }
+.star-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.star-detail-actions .star-btn { padding: 5px 10px; font-size: 11px; }
+.star-detail-actions .star-btn.danger { color: var(--danger); border-color: rgba(255, 123, 123, 0.4); }
+.star-detail-actions .star-btn.primary { color: #06121d; background: var(--accent); border-color: var(--accent); }
+
+/* 手动纠正表单 */
+.correction-form {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.correction-form.hidden { display: none; }
+.correction-form .cf-title { font-size: 12px; color: var(--accent); margin-bottom: 2px; }
+.correction-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-sub); }
+.correction-form input {
+  width: 100%; font-size: 12px; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 5px; background: rgba(16, 22, 38, 0.9); color: var(--text); outline: none;
+}
+.correction-form input:focus { border-color: var(--accent); }
+.correction-form .cf-row { display: flex; gap: 8px; }
+.correction-form .cf-row label { flex: 1; }
+.correction-form .cf-actions { display: flex; gap: 8px; margin-top: 4px; }
+.correction-form .cf-actions .star-btn { flex: 1; padding: 6px 10px; font-size: 11px; }
+.correction-form .cf-actions .save { background: var(--accent); color: #06121d; border-color: var(--accent); }
+
+.star-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--text-sub); font-size: 14px;
+}
+.star-empty.hidden { display: none; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(140, 160, 200, 0.25); border-radius: 4px; }
+
+@media (max-width: 760px) {
+  .star-subtitle { display: none; }
+  .star-left { width: 230px; }
+  .star-right { width: 260px; }
+  .star-header-right .star-stats { display: none; }
+}
