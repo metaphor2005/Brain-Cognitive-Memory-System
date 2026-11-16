@@ -175,13 +175,6 @@ python maintenance.py --seed-persona --space jiangyan
 ### `data/corpus/`（建议保留）
 用于检索增强或知识补充的文本语料，可按需扩展。
 
-### 本地运行时数据（通常不建议公开上传）
-- `data/memory.db`（及 `*-wal` / `*-shm`）：实际对话、记忆、信念与运行状态数据库
-- `data/vectors/`：向量索引缓存
-- `data/persona_snapshots/`：运行中生成的人格快照
-- `data/user_avatar.json`：用户自定义头像等个人数据
-- `logs/`：运行日志
-
 ---
 
 ## 维护脚本（`maintenance.py`）
@@ -217,29 +210,6 @@ $env:PYTHONIOENCODING='utf-8'; py tests/smoke_test.py
 ```
 
 也可按需运行其他测试文件（以 `tests/` 目录实际内容为准）。
-
----
-
-## 发布到 GitHub 前的建议（重要）
-
-如果目标是公开仓库，请重点检查并清理以下内容：
-
-### 不建议上传
-- `.env`（API Key 等密钥）
-- `data/memory.db`、`data/memory.db-wal`、`data/memory.db-shm`（真实对话与运行记忆）
-- `data/user_avatar.json`（个人数据）
-- `data/vectors/`（可重建缓存）
-- `data/persona_snapshots/`（运行时快照）
-- `.venv/`、`__pycache__/`、`.ruff_cache/`、`.idea/`、`*.pyc` 等环境/缓存文件
-
-### 建议保留
-- 源码与前端：`api/`、`cognitive/`、`web/`、`tests/`
-- 基础人设与语料：`data/persona/`、`data/corpus/`、`data/README.md`
-- 配置模板与文档：`.env.example`、`.gitignore`、`README.md`、`README.cn.md`、`requirements.txt`、`docs/`
-
-### 额外提醒
-- 若前端信念星图依赖离线 3D 库文件（如 `web/vendor/3d-force-graph.min.js`），请确认发布目录中已包含该文件；缺失时星图可能无法加载。
-- 修改提示词/后端逻辑后需重启后端；前端静态资源更新后刷新页面即可。
 
 ---
 
