@@ -85,6 +85,8 @@ class TopicStore:
                    t.snapshot_version as snapshot_version, t.kind as kind,
                    t.consolidated as consolidated, t.is_big_event as is_big_event,
                    t.turn_id as turn_id,
+                   t.lifecycle_state as lifecycle_state,
+                   t.last_access_ts as last_access_ts,
                    t.create_ts as create_ts
             from topic as t
             where t.space_id = ? and t.topic_id = ?
@@ -119,6 +121,8 @@ class TopicStore:
                    t.snapshot_version as snapshot_version, t.kind as kind,
                    t.consolidated as consolidated, t.is_big_event as is_big_event,
                    t.turn_id as turn_id,
+                   t.lifecycle_state as lifecycle_state,
+                   t.last_access_ts as last_access_ts,
                    t.create_ts as create_ts
             from topic as t
             where t.space_id = ? and t.turn_id = ?
@@ -133,12 +137,15 @@ class TopicStore:
 
         return self._row_to_topic(space_id, row)
 
-    def list_topics(self, space_id: str, limit: int = 100) -> List[Topic]:
+    def list_topics(
+        self, space_id: str, limit: int = 100, include_forgotten: bool = False
+    ) -> List[Topic]:
         """
         按时间倒序列出主题。
 
         :param space_id: 记忆空间
         :param limit: 返回上限
+        :param include_forgotten: 审计/导出场景可包含已遗忘主题
         :return: 主题列表
         """
         connection = self.db.conn()
@@ -149,9 +156,13 @@ class TopicStore:
                    t.snapshot_version as snapshot_version, t.kind as kind,
                    t.consolidated as consolidated, t.is_big_event as is_big_event,
                    t.turn_id as turn_id,
+                   t.lifecycle_state as lifecycle_state,
+                   t.last_access_ts as last_access_ts,
                    t.create_ts as create_ts
             from topic as t
             where t.space_id = ?
+            """ + ("" if include_forgotten else
+                   " and coalesce(t.lifecycle_state, 'active') != 'forgotten'") + """
             order by t.create_ts desc
             limit ?
             """,
@@ -187,6 +198,8 @@ class TopicStore:
                    t.snapshot_version as snapshot_version, t.kind as kind,
                    t.consolidated as consolidated, t.is_big_event as is_big_event,
                    t.turn_id as turn_id,
+                   t.lifecycle_state as lifecycle_state,
+                   t.last_access_ts as last_access_ts,
                    t.create_ts as create_ts
             from topic as t
             where t.space_id = ?
@@ -301,6 +314,14 @@ class TopicStore:
             consolidated=bool(row["consolidated"]) if "consolidated" in keys else False,
             is_big_event=bool(row["is_big_event"]) if "is_big_event" in keys else False,
             turn_id=(row["turn_id"] or "") if "turn_id" in keys else "",
+            lifecycle_state=(
+                str(row["lifecycle_state"] or "active")
+                if "lifecycle_state" in keys else "active"
+            ),
+            last_access_ts=(
+                int(row["last_access_ts"] or 0)
+                if "last_access_ts" in keys else 0
+            ),
             create_ts=int(row["create_ts"] or 0),
         )
 
@@ -343,6 +364,7 @@ class TopicStore:
             select x.content as content
             from experience as x
             where x.space_id = ? and x.topic_id = ?
+              and coalesce(x.lifecycle_state, 'active') != 'forgotten'
             order by x.create_ts asc
             """,
             (space_id, topic_id),

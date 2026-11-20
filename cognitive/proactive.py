@@ -109,6 +109,7 @@ class ProactiveInitiator:
                 select exp_id, topic_id, content
                 from experience
                 where space_id = ?
+                  and coalesce(lifecycle_state, 'active') != 'forgotten'
                 order by create_ts desc
                 limit 200
                 """,
@@ -294,3 +295,36 @@ class ProactiveInitiator:
             "reason": "模型不可用，随机排期",
             "source": "fallback",
         }
+
+
+def run_due_once(agent: Any, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    兑现一次到期的主动联系排期。
+
+    API 的进程内调度线程与外部 worker 共用这一份逻辑，避免两边行为漂移。
+    排期表（SQLite 的 proactive_schedule）本身就是持久化队列，claim 带条件更新，
+    两个进程同时跑也只有一个能兑现同一张表。
+
+    :param agent: CognitiveAgent（只需 .db 与 .proactive_tick）
+    :param limit: 本次最多扫描几条到期排期
+    :return: 每条的兑现报告
+    """
+    if not config.PROACTIVE_ENABLED:
+        return []
+
+    from cognitive.storage.affection_store import ProactiveScheduleStore
+
+    due = ProactiveScheduleStore(agent.db).list_due(limit=limit)
+    reports: List[Dict[str, Any]] = []
+    for row in due:
+        report = agent.proactive_tick(row["space_id"], row["session_id"])
+        reports.append(
+            {
+                "space_id": row["space_id"],
+                "session_id": row["session_id"],
+                "sent": bool(report.get("sent")),
+                "reason": report.get("reason", ""),
+                "message": report.get("message") or {},
+            }
+        )
+    return reports

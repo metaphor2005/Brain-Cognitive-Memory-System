@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import config
 
@@ -27,7 +27,8 @@ ANSWER_SYSTEM_TEMPLATE = """你是「{persona_name}」，一个具备分层记�
 
 【你当前的人格倾向】
 {tendency}
-
+{emotion_block}
+{reunion_block}
 【你的核心信念】
 {core_beliefs}
 
@@ -188,6 +189,20 @@ PROACTIVE_EVENT_RULES = {
     ),
 }
 
+# 好感表达分层的语气提示：只进 Prompt，不改数值，也不写进发件箱表。
+AFFECTION_TIER_CUES = {
+    "warm": "语气亲近自然，可以流露出在意和信任。",
+    "neutral": "语气平和克制，保持普通朋友的分寸。",
+    "distant": "语气疏离冷淡，保持距离，不主动示好。",
+}
+
+# 关系温度区块里给模型看的档位描述（比直接报数字更能影响措辞）
+AFFECTION_TIER_PROMPT_DESC = {
+    "warm": "关系亲近、信任",
+    "neutral": "关系平和、有分寸",
+    "distant": "关系疏离、有距离感",
+}
+
 
 # ============================================================
 # 二c、日常主动发起（想起记忆里的一件事，来找对方说话）
@@ -312,6 +327,7 @@ def build_proactive_messages(
     value_after: float,
     status: str,
     reason: str,
+    tier: str = "",
 ) -> List[Dict[str, str]]:
     """
     组装主动消息组稿的消息列表。
@@ -323,8 +339,16 @@ def build_proactive_messages(
     :param value_after: 变化后好感度
     :param status: 变化后关系状态
     :param reason: 变化原因（来自抽取的 affection_deltas）
+    :param tier: 表达档位（warm / neutral / distant）；空串表示不启用，保持旧行为
     :return: OpenAI 格式消息列表
     """
+    event_rule = PROACTIVE_EVENT_RULES.get(kind, PROACTIVE_EVENT_RULES["reach_out"])
+    cue = AFFECTION_TIER_CUES.get(tier, "")
+    if cue:
+        # 拼进事件规则而不是改模板：tier 为空时 Prompt 与旧版逐字一致，
+        # 不传新参数的调用方（含现有测试）完全不受影响。
+        event_rule = f"{event_rule}\n另外，{cue}"
+
     system_content = PROACTIVE_SYSTEM_TEMPLATE.format(
         persona_name=persona_name,
         person=person,
@@ -332,7 +356,7 @@ def build_proactive_messages(
         value_after=f"{value_after:.0f}",
         status=status,
         reason=reason or "（对话中的互动）",
-        event_rule=PROACTIVE_EVENT_RULES.get(kind, PROACTIVE_EVENT_RULES["reach_out"]),
+        event_rule=event_rule,
     )
     return [
         {"role": "system", "content": system_content},
@@ -453,6 +477,69 @@ def render_persona_profile(profile: Dict[str, Any] | None = None) -> str:
     return PROFILE_TEMPLATE.replace("{blocks}", blocks)
 
 
+def render_reunion_block(
+    last_interaction_ts: Optional[int],
+    now: int,
+    min_hours: Optional[float] = None,
+    long_hours: Optional[float] = None,
+    last_topic_title: str = "",
+) -> str:
+    """
+    把"距上次说话过了多久"渲染成重逢/时光流逝的 Prompt 区块（纯函数，便于离线测试）。
+
+    为什么要它：系统早就记着上次互动时间（session_store.update_ts），却从没用在回答上，
+    于是隔三天和隔三分钟开口，她的反应一模一样——这不像人。人隔一阵再见会自然带出
+    "好久不见""最近怎么样"。这里只给模型"时间背景"，具体怎么措辞交给它。
+
+    关键约束：
+    - ``now`` 必须显式传入，函数内部绝不读真实时钟，测试可注入任意时间；
+    - 空值 / 时间倒流 / 间隔太短 / 开关关闭 → 返回空串（空串时 Prompt 与旧行为逐字一致）；
+    - 只描述"时间背景"，不强迫她一定说客套话——思考纪律第 5 条仍要求别堆砌客套。
+
+    :param last_interaction_ts: 上次互动时刻（Unix 秒），None 表示新会话
+    :param now: 当前时刻（Unix 秒）
+    :param min_hours: 算"久别"的最小间隔，缺省读 config
+    :param long_hours: 算"好久不见"的长间隔，缺省读 config
+    :param last_topic_title: 上次聊的话题标题（可选，用来带出"后来怎么样了"）
+    :return: 区块文本；不该触发时返回空串
+    """
+    if not config.REUNION_ENABLED:
+        return ""
+    if not last_interaction_ts or last_interaction_ts <= 0:
+        return ""
+
+    gap_hours = (int(now) - int(last_interaction_ts)) / 3600.0
+    if gap_hours <= 0:  # 时间倒流（测试注入或时钟回拨）不当成重逢
+        return ""
+
+    min_h = min_hours if min_hours is not None else config.REUNION_MIN_HOURS
+    long_h = long_hours if long_hours is not None else config.REUNION_LONG_HOURS
+    if gap_hours < min_h:
+        return ""
+
+    # 换算成"天/小时"给人看的口径，模型才好拿去说"好几天"
+    if gap_hours >= 24:
+        span = f"{gap_hours / 24:.0f} 天"
+    else:
+        span = f"{gap_hours:.0f} 小时"
+
+    if gap_hours >= long_h:
+        greeting = f"你们大约有 {span} 没说话了，久别重逢——可以自然地带一句想念或「好久不见」，别一上来就公事公办。"
+    else:
+        greeting = f"距上次聊天大约 {span}，开场可以自然地关心一句「最近怎么样」，别像刚见面一样毫无过渡。"
+
+    lines = [greeting]
+    if last_topic_title:
+        title = last_topic_title.strip()
+        if title:
+            lines.append(
+                f"上次聊的是「{title}」，如果你想接上，可以用「上次你说……后来怎么样了」这种问法，"
+                "但不确定后续就别替对方编结论。"
+            )
+    lines.append("（这些只是时间背景，不必生硬照念；对方要是直奔主题，就跟着对方的节奏走。）")
+    return "【久别重逢】\n" + "\n".join(lines)
+
+
 def build_answer_messages(
     persona_name: str,
     self_view: str,
@@ -463,6 +550,8 @@ def build_answer_messages(
     user_message: str,
     rag_loop_note: str = "",
     profile_block: str = "",
+    emotion_block: str = "",
+    reunion_block: str = "",
 ) -> List[Dict[str, str]]:
     """
     组装回答生成的完整消息列表。
@@ -476,6 +565,8 @@ def build_answer_messages(
     :param user_message: 用户当前消息
     :param rag_loop_note: 本轮检索循环记录（第几轮/上限/是否已用尽）
     :param profile_block: 身份档案区块（缺省按 config.PERSONA_PROFILE 渲染）
+    :param emotion_block: 此刻情绪的措辞区块（缺省为空，保持旧行为）
+    :param reunion_block: 久别重逢的时间背景区块（缺省为空，保持旧行为）
     :return: OpenAI 格式消息列表
     """
     # 核心信念渲染为短句，避免占用过多 token
@@ -486,6 +577,8 @@ def build_answer_messages(
         profile_block=profile_block or render_persona_profile(),
         self_view=self_view,
         tendency=tendency,
+        emotion_block=(f"\n{emotion_block}\n" if emotion_block else ""),
+        reunion_block=(f"\n{reunion_block}\n" if reunion_block else ""),
         core_beliefs=beliefs_text,
     )
 

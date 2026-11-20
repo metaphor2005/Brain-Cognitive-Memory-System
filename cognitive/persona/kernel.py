@@ -22,6 +22,86 @@ import config
 from cognitive.storage.database import Database
 
 
+# 情绪 → 自然语言：每种情绪"在说话上是什么样"。
+# 设计要点：不写"强度 0.62"这种裸数字给模型看（它不知道该怎样变成语气），
+# 而是翻译成具体的说话方式，模型才知道"委屈时话短一点、会停顿"。
+# 分低/高两档：轻微波澜和明显情绪的表达强度不一样。
+_EMOTION_CUES: Dict[str, Dict[str, str]] = {
+    "hurt": {
+        "low": "心里有点不是滋味，话会比平时短一些，可能停顿一下再接。",
+        "high": "明显觉得委屈，句子变短、会有停顿，不会立刻笑着接话；可以平静地说出不舒服。",
+    },
+    "warm": {
+        "low": "心里有点暖，语气比平时软一点，愿意多说两句。",
+        "high": "明显感到亲近和暖意，语气放松、带笑意，愿意主动关心对方。",
+    },
+    "guilty": {
+        "low": "有点过意不去，语气放轻，会照顾对方的感受。",
+        "high": "心里挺愧疚，会先承认自己做得不对，不急着辩解。",
+    },
+    "self_reflect": {
+        "low": "略有些自省，回答前会多想一下自己之前说得对不对。",
+        "high": "正在认真反思，会主动指出自己前后不一致的地方。",
+    },
+    "skeptical": {
+        "low": "比平时更审慎，对新说法会多问一句依据。",
+        "high": "明显不轻信，会要求证据或指出漏洞，而不是顺着说。",
+    },
+    "empathetic": {
+        "low": "更留意对方的感受，语气放柔和些。",
+        "high": "把对方情绪放在前面，先安抚再讲道理。",
+    },
+    "exploratory": {
+        "low": "更愿意多问一句、把话题往前推。",
+        "high": "明显想展开聊，会主动追问细节或抛出新角度。",
+    },
+    "analytic": {
+        "low": "倾向把事情拆开来讲清楚。",
+        "high": "明显在分步拆解，先讲结论再讲依据。",
+    },
+}
+
+# 情绪区块最多列几条，防止挤占上下文
+_EMOTION_BLOCK_MAX = 3
+
+
+def render_emotion_block(moods: Dict[str, float], min_intensity: Optional[float] = None) -> str:
+    """
+    把情绪强度渲染成"此刻怎么说话"的 Prompt 区块（纯函数，便于离线测试）。
+
+    与 ``describe()`` 的区别：describe 是长期行为倾向（挤在 14 个参数里），
+    这里只讲"此刻心里的事"，并且翻译成具体措辞，模型才用得上。
+
+    :param moods: {模式: 强度}
+    :param min_intensity: 强度门槛，缺省读 config
+    :return: 区块文本；没有够强的情绪时返回空串
+    """
+    if not config.EMOTION_SPEECH_ENABLED:
+        return ""
+    threshold = min_intensity if min_intensity is not None else config.EMOTION_SPEECH_MIN_INTENSITY
+
+    lines = []
+    # 强度高的排前面；同强度按模式名兜底，保证输出稳定可对比
+    ordered = sorted(moods.items(), key=lambda item: (-float(item[1]), str(item[0])))
+    for mode, raw_intensity in ordered:
+        intensity = float(raw_intensity)
+        if intensity < threshold:
+            continue
+        cues = _EMOTION_CUES.get(mode)
+        if not cues:
+            continue
+        cue = cues["high"] if intensity >= 0.6 else cues["low"]
+        lines.append(f"· {cue}")
+        if len(lines) >= _EMOTION_BLOCK_MAX:
+            break
+
+    if not lines:
+        return ""
+    return "【此刻的情绪】\n" + "\n".join(
+        lines + ["（这些是此刻的感受，会影响你的语气，但不必直白地说'我现在很委屈'。）"]
+    )
+
+
 class PersonaKernel:
     """人格参数与情景状态的读写与演化。"""
 
@@ -480,6 +560,45 @@ class PersonaKernel:
         connection.commit()
         return result
 
+    def react_to_events(self, events: List[str]) -> Dict[str, float]:
+        """
+        把本轮真实发生的事翻译成情绪反应（纯展示逻辑之外的状态变更入口）。
+
+        为什么需要它：在此之前，情绪只能由模型在归档时顺手填一个 mode，
+        "核心信念被推翻了她却毫无感觉"——这正是项目评审里点名的"最不像人的地方"。
+        现在由**事件本身**（不是模型的 discretion）触发确定的情绪，保证只要事情发生，
+        就有对应的内心反应。只改情绪数值，绝不自动发消息。
+
+        :param events: 事件名列表，取值见下方映射
+        :return: 实际激活/增强的情绪 {模式: 强度}，便于上报与测试
+        """
+        if not config.EMOTION_EVENT_TRIGGER_ENABLED:
+            return {}
+
+        # 一个事件可同时唤起多种情绪（被否定 = 失落 + 忍不住自省）
+        mapping: Dict[str, Dict[str, float]] = {
+            "belief_overturned": {"hurt": 0.55, "self_reflect": 0.5, "skeptical": 0.4},
+            "relation_cold": {"hurt": 0.5},
+            "relation_severed": {"hurt": 0.8, "self_reflect": 0.45},
+            "relation_reconciled": {"warm": 0.7},
+            "affection_up": {"warm": 0.45},
+        }
+
+        touched: set = set()
+        for event in events:
+            for mode, intensity in mapping.get(event, {}).items():
+                if mode not in config.MOOD_MODE_WHITELIST:
+                    continue
+                self.set_mood(mode, intensity)
+                touched.add(mode)
+
+        # 上报"实际写入的强度"而非映射表里的名义值：set_mood 用
+        # max(新值, 衰减后旧值)，若该情绪本就更强，名义值会低于真实状态，误导调试。
+        if not touched:
+            return {}
+        current = self.get_moods()
+        return {mode: current[mode] for mode in touched if mode in current}
+
     def get_moods(self) -> Dict[str, float]:
         """
         读取当前活跃的情景状态。
@@ -813,7 +932,11 @@ class PersonaKernel:
         params = self.get_params()
         moods = self.get_moods()
 
-        # 情景状态先行，用来给它预留行数——否则参数攒满 8 行，最"当下"的情绪反而被挤掉
+        # 情景状态先行，用来给它预留行数——否则参数攒满 8 行，最"当下"的情绪反而被挤掉。
+        # 情绪区块（render_emotion_block）开启后，所有情绪由它统一翻译成措辞；
+        # 这里若再输出一份"强度 0.75"的裸数字行，同一 Prompt 会出现两份重叠指令，
+        # 且阈值不一致（这里写死 0.3，那边读配置）。故开启时不再重复输出——
+        # 关闭时保留旧行为，便于 A/B 对照。
         mood_text = {
             "self_reflect": "此刻你处于较强的自省状态",
             "skeptical": "此刻你对新信息保持审慎",
@@ -821,11 +944,14 @@ class PersonaKernel:
             "analytic": "此刻你更倾向分步分析",
             "empathetic": "此刻你更关注对方的感受",
         }
-        mood_lines = [
-            f"{mood_text[mode]}（强度 {intensity:.2f}）。"
-            for mode, intensity in moods.items()
-            if intensity >= 0.3 and mode in mood_text
-        ]
+        if config.EMOTION_SPEECH_ENABLED:
+            mood_lines: List[str] = []
+        else:
+            mood_lines = [
+                f"{mood_text[mode]}（强度 {intensity:.2f}）。"
+                for mode, intensity in moods.items()
+                if intensity >= 0.3 and mode in mood_text
+            ]
 
         # 按"离中位多远"排序：先讲她此刻最鲜明的特征，而不是按参数字母序；
         # 同幅度时按参数名兜底，保证同样的库两次调用输出顺序一致（便于对比调试）

@@ -10,12 +10,14 @@ SQLite 连接与建表管理。
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Optional
 
 import config
+from cognitive.models import new_id
 
 
 # 所有建表语句集中于此，保证 schema 可审计、可迁移
@@ -289,6 +291,21 @@ _SCHEMA_STATEMENTS = [
         updated_ts   integer
     )
     """,
+    # 记忆生命周期事件（append-only）：谁在什么时候从什么状态变到什么状态。
+    # 遗忘只改状态、不物理删除，这张表就是"它为什么消失/回来"的账本。
+    """
+    create table if not exists memory_lifecycle_event (
+        space_id    text,
+        event_id    text,
+        unit_type   text,             -- belief / topic / experience
+        unit_id     text,
+        from_state  text,
+        to_state    text,
+        reason      text,
+        create_ts   integer,
+        primary key (space_id, event_id)
+    )
+    """,
 ]
 
 
@@ -338,6 +355,14 @@ _COLUMN_MIGRATIONS = [
     ("task", "failed_ts", "failed_ts integer"),
     # 记忆边界
     ("memory_bound", "updated_ts", "updated_ts integer"),
+    # 生命周期：last_access_ts 故意不给默认值，老行保持 NULL，
+    # 由 coalesce(nullif(last_access_ts, 0), create_ts) 回退到创建时间。
+    ("kg_relation", "last_access_ts", "last_access_ts integer"),
+    ("topic", "last_access_ts", "last_access_ts integer"),
+    ("experience", "last_access_ts", "last_access_ts integer"),
+    ("kg_relation", "lifecycle_state", "lifecycle_state text default 'active'"),
+    ("topic", "lifecycle_state", "lifecycle_state text default 'active'"),
+    ("experience", "lifecycle_state", "lifecycle_state text default 'active'"),
 ]
 
 
@@ -481,7 +506,10 @@ class TaskStore:
         params = params or {}
         payload = payload or {}
         now = int(__import__("time").time())
-        row = self.db.conn().execute(
+        # id 必须只生成一次：旧实现插入时生成一个随机 id，返回时又生成另一个，
+        # 导致 create() 几乎必然返回 None；且 4 位随机数并发下极易碰撞。
+        task_id = new_id("task")
+        self.db.conn().execute(
             """
             insert into task
                 (task_id, space_id, kind, action, params, payload, status,
@@ -489,19 +517,18 @@ class TaskStore:
             values (?, ?, ?, ?, ?, ?, 'pending', 0, 3, ?, ?)
             """,
             (
-                self._new_id("task"),
+                task_id,
                 space_id,
                 kind,
                 action,
                 json.dumps(params, ensure_ascii=False),
                 json.dumps(payload, ensure_ascii=False),
-                now,
-                now + 1,
-                now,
+                now + 1,  # next_run_ts：延后 1 秒再执行
+                now,      # created_ts
             ),
         )
         self.db.conn().commit()
-        return self.get(self._new_id_after(row))
+        return self.get(task_id)
 
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         row = self.db.conn().execute(
@@ -562,13 +589,6 @@ class TaskStore:
         row = self.get(task_id)
         return row if row else None
 
-    def _new_id(self, prefix: str) -> str:
-        import random
-
-        return f"{prefix}_{random.randint(1000, 9999)}"
-
-    def _new_id_after(self, row: Dict[str, Any]) -> str:
-        return self._new_id("task")
 
 
 class StorylineStore:

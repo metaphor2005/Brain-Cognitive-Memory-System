@@ -749,3 +749,24 @@ class ProactivePolicyStore:
             if last and int(now or time.time()) - last < cooldown:
                 return "cooldown"
         return ""
+
+
+def phrasing_tier(value: float, status: str) -> str:
+    """
+    把好感数值 + 状态映射为表达档位：warm / neutral / distant。
+
+    只影响措辞，不改数值演化与状态机。规则：
+    - broken（断交）/ cold（冷淡）无论数值多高都按 distant；
+    - normal 按数值分档：>= WARM 为 warm，<= DISTANT 为 distant，其余 neutral；
+    - 关闭 AFFECTION_TIER_ENABLED 时返回空串，表示调用方应回退到旧写法。
+    """
+    if not config.AFFECTION_TIER_ENABLED:
+        return ""
+    if status in ("broken", "cold"):
+        return "distant"
+    value = float(value)
+    if value >= config.AFFECTION_TIER_WARM:
+        return "warm"
+    if value <= config.AFFECTION_TIER_DISTANT:
+        return "distant"
+    return "neutral"

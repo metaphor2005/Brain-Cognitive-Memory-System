@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import config
 from cognitive.cognition.extractors import ArchiveExtractor, NarrativeGenerator
+from cognitive.cognition.lifecycle import LifecycleManager
 from cognitive.cognition import prompts
 from cognitive.llm import DeepSeekClient, LLMError
 from cognitive.models import (
@@ -31,7 +32,7 @@ from cognitive.models import (
 from cognitive.persona.changelog import PersonaChangelogStore
 from cognitive.persona.kernel import PersonaKernel
 from cognitive.persona.snapshot import PersonaSnapshotStore
-from cognitive.storage.affection_store import AffectionStore, ProactiveOutbox
+from cognitive.storage.affection_store import AffectionStore, ProactiveOutbox, phrasing_tier
 from cognitive.storage.database import Database
 from cognitive.storage.kg_store import KGStore
 from cognitive.storage.topic_store import TopicStore
@@ -55,6 +56,14 @@ _PROACTIVE_TEMPLATES = {
 
 
 _SELF_ALIASES = ("我", "自己", "你", "本人", "本助手", "助手")
+
+# 人格更新准入：本轮出现这些"讨论/塑造自我"的说法才允许改人格参数。
+# 之前只写了注释却漏定义本常量，导致配了模型的生产路径归档必抛 NameError
+# （测试全走 client=None 的降级分支，恰好绕过了这行，所以一直没暴露）。
+_SELF_SHAPING_HINTS = (
+    "你希望", "你觉得", "你的定位", "你认为自己", "你想成为",
+    "你的性格", "你的想法", "你是谁", "你的原则", "你对自己",
+)
 
 
 def _mentions_self(name: str) -> bool:
@@ -347,6 +356,8 @@ class MemoryArchiver:
 
         # ---------- 步骤 4：写入结构化信念 ----------
         conflict_records: List[str] = []
+        # 本轮真实发生的、值得有情绪反应的事件（收齐后统一触发，见步骤 8）
+        emotion_events: List[str] = []
 
         for entity in extracted["entities"]:
             name = self._normalize_self_name(entity["name"])
@@ -404,7 +415,9 @@ class MemoryArchiver:
             report["relations"] += 1
             if gated:
                 report["gated"] = True
-            for old_value, new_value in outcome["conflicts"]:
+            # §9 重构时 upsert_relation 会被 upsert_belief 三态判定取代，
+            # conflicts 字段可能消失；用 .get 兜底，届时改用 refinement/distinct 结果触发情绪。
+            for old_value, new_value in (outcome.get("conflicts") or []):
                 conflict_records.append(
                     f"{head} {relation['rel']}：{old_value} -> {new_value}"
                 )
@@ -427,6 +440,11 @@ class MemoryArchiver:
                     )
                 )
                 if is_core_belief:
+                    # 只有"自己相信的重要信念"被推翻才该难受（项目评审点名的"最不像人"缺口）。
+                    # 他人琐碎事实（谁生日改期）被纠正不该唤起 hurt，否则"更像人"变成"对什么都委屈"。
+                    # 一轮推翻多条时去重：情绪取最大值即可，不必重复写库。
+                    if "belief_overturned" not in emotion_events:
+                        emotion_events.append("belief_overturned")
                     changelog.append(
                         PersonaChange(
                             log_id=new_id("plog"),
@@ -497,8 +515,18 @@ class MemoryArchiver:
 
                 events = outcome["events"]
                 if not events:
-                    # 未跨阈值：只记录数值，不主动发消息
+                    # 未跨阈值：只记录数值，不主动发消息；但明显升温仍该有点暖意
+                    if item["delta"] > 0:
+                        emotion_events.append("affection_up")
                     continue
+
+                # 关系跨阈值是真实的情感事件，触发内心反应（不发消息、不进调度）
+                if "severed" in events:
+                    emotion_events.append("relation_severed")
+                elif "cold" in events:
+                    emotion_events.append("relation_cold")
+                elif "reconciled" in events:
+                    emotion_events.append("relation_reconciled")
 
                 # 一轮同时跨过 cold 和 severed 时只发断交（断交声明已涵盖"我们有问题"）
                 if "severed" in events:
@@ -609,8 +637,18 @@ class MemoryArchiver:
             kernel.set_live_self_view(new_self_view)
             report["self_view_live"] = new_self_view
 
-        # ---------- 步骤 8：情景状态衰减 ----------
-        kernel.decay_moods()
+        # ---------- 步骤 8：情景状态衰减，再叠加本轮事件触发的情绪 ----------
+        # 顺序很关键：先衰减旧情绪，再写入新触发的，否则刚被推翻的难受会当场打折。
+        # 情绪是增强项：它失败不该让整轮归档"报告失败但前面已落库半份"。降级为空继续。
+        try:
+            kernel.decay_moods()
+            activated = kernel.react_to_events(emotion_events)
+        except Exception as exc:
+            activated = {}
+            report["emotion_degraded"] = f"{type(exc).__name__}: {exc}"
+        if activated:
+            report["emotion_events"] = emotion_events
+            report["emotion_activated"] = activated
 
         # ---------- 步骤 9：大事判定 ----------
         # 两类信号：
@@ -630,6 +668,13 @@ class MemoryArchiver:
 
         if report["is_big_event"]:
             topics_store.mark_big_event(space_id, topic.topic_id)
+
+        # 生命周期登记：新单元默认 active，并把本轮经验/信念的首次访问时间
+        # 对齐到写入时刻。已遗忘的单元不会被这里悄悄复活。
+        try:
+            LifecycleManager(self.db).register_topic(space_id, topic.topic_id)
+        except Exception:
+            pass
 
         report["ok"] = True
         return report
@@ -839,6 +884,7 @@ class MemoryArchiver:
                     value_after=float(outcome["after"]),
                     status=str(outcome["status"]),
                     reason=reason,
+                    tier=phrasing_tier(outcome["after"], outcome["status"]),
                 )
                 content = self.client.chat(
                     messages,
@@ -908,6 +954,10 @@ class MemoryArchiver:
                     "session_id": context.session_id,
                 },
             )
+            try:
+                LifecycleManager(self.db).register_topic(space_id, topic.topic_id)
+            except Exception:
+                pass
             return topic
         except Exception:
             # 降级本身失败不影响主流程

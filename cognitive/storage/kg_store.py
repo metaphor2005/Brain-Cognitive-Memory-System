@@ -20,9 +20,11 @@ from cognitive.models import KGEntity, KGRelation, Topic
 from cognitive.storage.database import Database
 
 
-# 关系写回时的权重增量（代码层演化，不依赖模型）
-CONFIDENCE_BOOST: float = 0.05
-IMPORTANCE_BOOST: float = 0.03
+# 关系写回时的权重增量已移到 config.py（BELIEF_BOOST_CONFIDENCE /
+# BELIEF_BOOST_IMPORTANCE / BELIEF_BOOST_WEIGHTS / BELIEF_BOOST_SATURATION），
+# 便于按部署场景调整；这里保留兼容别名，避免外部 import 断裂。
+CONFIDENCE_BOOST: float = config.BELIEF_BOOST_CONFIDENCE
+IMPORTANCE_BOOST: float = config.BELIEF_BOOST_IMPORTANCE
 
 
 class KGStore:
@@ -98,6 +100,46 @@ class KGStore:
     # ------------------------------------------------------------
     # 关系（含冲突与权重演化）
     # ------------------------------------------------------------
+    @staticmethod
+    def _boost_amount(source_type: str) -> float:
+        """证据分级：这条确认来自谁，决定基础增益的倍数。"""
+        return float(config.BELIEF_BOOST_WEIGHTS.get(source_type or "", 0.6))
+
+    @staticmethod
+    def _boosted_confidence(current: float, source_type: str) -> float:
+        """
+        加固后的置信度。
+
+        饱和增益：越接近 1.0，单次提升越小（乘 1 - current），
+        避免同一句话被确认几次就到满分。证据权重来自 source_type。
+        """
+        gain = config.BELIEF_BOOST_CONFIDENCE * KGStore._boost_amount(source_type)
+        if config.BELIEF_BOOST_SATURATION:
+            gain *= max(0.0, 1.0 - float(current))
+        return max(0.0, min(1.0, float(current) + gain))
+
+    @staticmethod
+    def _boosted_importance(current: float, source_type: str) -> float:
+        """加固后的重要度（同样带饱和与证据分级）。"""
+        gain = config.BELIEF_BOOST_IMPORTANCE * KGStore._boost_amount(source_type)
+        if config.BELIEF_BOOST_SATURATION:
+            gain *= max(0.0, 1.0 - float(current))
+        return max(0.0, min(1.0, float(current) + gain))
+
+    @staticmethod
+    def _is_single_value(rel: str, relation_multi: bool, row_multi: bool) -> bool:
+        """
+        是否按单值维度处理（不同 tail 时推翻旧值）。
+
+        规则：
+        1. 任一方显式声明多值 → 共存；
+        2. 关系名在多值白名单 → 共存（模型漏标时兜底）；
+        3. 其余 → 单值，新值推翻旧值（保持既有语义）。
+        """
+        if relation_multi or row_multi:
+            return False
+        return rel not in config.BELIEF_MULTI_VALUE_RELS
+
     def upsert_relation(self, relation: KGRelation) -> Dict[str, Any]:
         """
         写入关系，并处理与既有信念的冲突。
@@ -142,8 +184,9 @@ class KGStore:
                 # "tail 相同"加固逻辑，on conflict 又把权重原样覆盖回去，
                 # 导致"重复确认会加固"只在测试里成立。
                 if row["tail_name"] == relation.tail_name:
-                    confidence = min(1.0, float(row["confidence"]) + CONFIDENCE_BOOST)
-                    importance = min(1.0, float(row["importance"]) + IMPORTANCE_BOOST)
+                    source = relation.source_type or "model_inferred"
+                    confidence = self._boosted_confidence(row["confidence"], source)
+                    importance = self._boosted_importance(row["importance"], source)
                     # 同一信念再次被确认时，多值属性按"或"合并：
                     # 一旦这个维度被判定过多值，就不再退化回单值推翻
                     multi = 1 if (relation.multi_valued or row["multi_valued"]) else 0
@@ -161,8 +204,9 @@ class KGStore:
 
             if row["tail_name"] == relation.tail_name:
                 # 同一信念被再次确认：权重加固，本次不重复插入
-                confidence = min(1.0, float(row["confidence"]) + CONFIDENCE_BOOST)
-                importance = min(1.0, float(row["importance"]) + IMPORTANCE_BOOST)
+                source = relation.source_type or "model_inferred"
+                confidence = self._boosted_confidence(row["confidence"], source)
+                importance = self._boosted_importance(row["importance"], source)
                 multi = 1 if (relation.multi_valued or row["multi_valued"]) else 0
                 connection.execute(
                     """
@@ -173,9 +217,11 @@ class KGStore:
                     (confidence, importance, multi, now, relation.space_id, row["rid"]),
                 )
                 boosted = True
-            elif relation.multi_valued or row["multi_valued"]:
-                # 多值维度：不同取值合法共存，旧行保持生效，本次照常插入新行
-                # （新行 rid 由三元组生成，tail 不同则 rid 不同，天然不会互相覆盖）
+            elif not self._is_single_value(
+                relation.rel, bool(relation.multi_valued), bool(row["multi_valued"])
+            ):
+                # 白名单外的维度（或显式多值）：不同取值合法共存，旧行保持生效，
+                # 本次照常插入新行。默认"宁可多记，不可误杀"。
                 coexisted = True
             else:
                 # 单值维度出现不同取值：旧信念被推翻
@@ -298,48 +344,57 @@ class KGStore:
         limit: Optional[int] = None,
     ) -> List[str]:
         """
-        根据用户输入做信念查询（实体名包含匹配 + 过去值检索）。
+        根据用户输入做信念查询（实体名/尾值包含匹配 + 过去值检索）。
 
         这是"精确查询"而非向量相似：
-        - 用户提到实体名 → 精确按头/尾实体命中（含同义扩展）；
-        - 没有实体名匹配 → 回退到重要信念或"过去值"（见 query_past_beliefs）；
-        - 对"现在值/当前偏好"的查询，只返回当前有效信念（valid_to > now）；
-        - 对"以前/曾经/过去"的查询，返回过去值（valid_to <= now），
-          让"以前喜欢吃什么"能命中旧偏好，而不是被现在的值抢走。
+        - 用户提到实体名或尾值 → 精确命中；
+        - 没有匹配 → 回退到重要性最高的"自身核心信念"；
+        - 对"以前/曾经/过去"的查询，返回过去值（见 query_past_beliefs）。
 
         :param space_id: 记忆空间
         :param text: 用户输入文本
         :param limit: 返回条数上限
         :return: 可直接注入 Prompt 的事实文本行
         """
-        past_cue = config.PAST_CUE_PATTERN.search(text or "")
-        if past_cue:
+        query_text = text or ""
+        if config.PAST_CUE_PATTERN.search(query_text):
             return [
                 self._format_fact(b)
-                for b in self.query_past_beliefs(space_id, text, limit)
+                for b in self.query_past_beliefs(space_id, query_text, limit)
             ]
 
         connection = self.db.conn()
         limit = limit or config.KG_MAX_ROWS
-        now = int(time.time())
 
-        # 有效性过滤：只在"今天或将来"的信念里取值，过期/失效值不进当前回答
-        def _valid(b: Dict[str, Any]) -> bool:
-            return b.get("valid_to", 0) > now or b.get("is_active") is True
+        # 匹配池 = 生效实体名 + 关系尾值。尾值可能没登记成实体，
+        # 只看实体表会让"只出现在关系里的取值"永远召回不了（spec §8 缺口 3）。
+        names = {
+            str(row["name"])
+            for row in connection.execute(
+                """
+                select e.name as name
+                from kg_entity as e
+                where e.space_id = ? and e.is_active = 1
+                """,
+                (space_id,),
+            ).fetchall()
+            if row["name"]
+        }
+        names.update(
+            str(row["tail_name"])
+            for row in connection.execute(
+                """
+                select distinct r.tail_name as tail_name
+                from kg_relation as r
+                where r.space_id = ? and r.is_active = 1
+                  and coalesce(r.lifecycle_state, 'active') != 'forgotten'
+                """,
+                (space_id,),
+            ).fetchall()
+            if row["tail_name"]
+        )
+        matched_names = {n for n in names if n in query_text}
 
-        # 取出全部生效实体，用于在文本中做包含匹配
-        entities = connection.execute(
-            """
-            select e.name as name, e.etype as etype
-            from kg_entity as e
-            where e.space_id = ? and e.is_active = 1
-            """,
-            (space_id,),
-        ).fetchall()
-
-        matched_names = {row["name"] for row in entities if row["name"] and row["name"] in text}
-
-        # 用户提到实体名时，按实体精确查；否则回退到重要性最高的"自身核心信念"
         rows: List[sqlite3.Row]
         if matched_names:
             placeholders = ",".join(["?"] * len(matched_names))
@@ -348,6 +403,7 @@ class KGStore:
                         r.confidence as confidence, r.importance as importance
                 from kg_relation as r
                 where r.space_id = ? and r.is_active = 1
+                  and coalesce(r.lifecycle_state, 'active') != 'forgotten'
                   and (r.head_name in ({placeholders}) or r.tail_name in ({placeholders}))
                 order by r.importance desc, r.confidence desc
                 limit ?
@@ -355,12 +411,14 @@ class KGStore:
             params = [space_id, *matched_names, *matched_names, limit]
             rows = connection.execute(sql, params).fetchall()
         else:
+            # 没命中任何实体/尾值：回退到最重要的几条核心信念。
             rows = connection.execute(
                 """
                 select r.head_name as head_name, r.rel as rel, r.tail_name as tail_name,
                         r.confidence as confidence, r.importance as importance
                 from kg_relation as r
                 where r.space_id = ? and r.is_active = 1
+                  and coalesce(r.lifecycle_state, 'active') != 'forgotten'
                 order by r.importance desc, r.confidence desc
                 limit ?
                 """,
@@ -370,33 +428,35 @@ class KGStore:
         if not rows:
             return []
 
-        # 相关性打分：实体名命中最高（1.0），关系名命中次之（0.8），
-        # 否则回退到重要性（0.6）。只有相关性够高才进 Prompt，避免无关事实污染回答。
+        def _format(row: sqlite3.Row, score: Optional[float] = None) -> str:
+            suffix = f"，相关度 {score:.2f}" if score is not None else ""
+            return (
+                f"{row['head_name']} {row['rel']} {row['tail_name']}"
+                f"（置信度 {float(row['confidence']):.2f}，"
+                f"重要性 {float(row['importance']):.2f}{suffix}）"
+            )
+
+        if not matched_names:
+            # 回退分支：核心信念直接全部返回，不做相关性过滤
+            return [_format(row) for row in rows]
+
+        # 相关性打分：尾值命中 1.0 > 头实体 0.9 > 关系名 0.8。
+        # 必须拿用户查询文本比对 —— 早期版本用行内拼出的文本，导致永远满分。
         def _relevance(row: sqlite3.Row) -> float:
-            text = f"{row['head_name'] or ''} {row['rel']} {row['tail_name']}"
-            if row["tail_name"] and row["tail_name"] in text:
+            head = str(row["head_name"] or "")
+            rel = str(row["rel"] or "")
+            tail = str(row["tail_name"] or "")
+            if tail and tail in query_text:
                 return 1.0
-            if row["head_name"] and row["head_name"] in text:
+            if head and head in query_text:
                 return 0.9
-            if row["rel"] and any(k in text for k in (row["rel"], row["head_name"], row["tail_name"])):
-                return 0.6
+            if rel and rel in query_text:
+                return 0.8
             return 0.0
 
-        scored: List[Tuple[str, float]] = []
-        for row in rows:
-            score = _relevance(row)
-            if score >= 0.5:
-                scored.append((row, score))
-
+        scored = [(row, score) for row in rows if (score := _relevance(row)) >= 0.5]
         scored.sort(key=lambda item: item[1], reverse=True)
-        facts: List[str] = []
-        for row, score in scored:
-            facts.append(
-                f"{row['head_name']} {row['rel']} {row['tail_name']}"
-                f"（置信度 {float(row['confidence']):.2f}，重要性 {float(row['importance']):.2f}，"
-                f"相关度 {score:.2f}）"
-            )
-        return facts
+        return [_format(row, score) for row, score in scored]
 
     def _format_fact(self, belief: Dict[str, Any]) -> str:
         return (
@@ -420,67 +480,6 @@ class KGStore:
             (space_id, head_name, rel),
         ).fetchone()
         return row["tail_name"] if row else ""
-
-    def query_by_text(self, space_id: str, text: str, limit: Optional[int] = None) -> List[str]:
-        """
-        根据用户输入做信念查询（实体名包含匹配）。
-
-        这是"精确查询"而非向量相似：只要是已登记的实体/关系，就一定能召回，
-        且只返回 is_active = 1 的当前有效信念。
-
-        :param space_id: 记忆空间
-        :param text: 用户输入文本
-        :param limit: 返回条数上限
-        :return: 可直接注入 Prompt 的事实文本行
-        """
-        connection = self.db.conn()
-        limit = limit or config.KG_MAX_ROWS
-
-        # 取出全部生效实体，用于在文本中做包含匹配
-        entities = connection.execute(
-            """
-            select e.name as name, e.etype as etype
-            from kg_entity as e
-            where e.space_id = ? and e.is_active = 1
-            """,
-            (space_id,),
-        ).fetchall()
-
-        matched_names = {row["name"] for row in entities if row["name"] and row["name"] in text}
-
-        # 用户提到实体名时，按实体精确查；否则回退到重要性最高的"自身核心信念"
-        rows: List[sqlite3.Row]
-        if matched_names:
-            placeholders = ",".join(["?"] * len(matched_names))
-            sql = f"""
-                select r.head_name as head_name, r.rel as rel, r.tail_name as tail_name,
-                       r.confidence as confidence, r.importance as importance
-                from kg_relation as r
-                where r.space_id = ? and r.is_active = 1
-                  and (r.head_name in ({placeholders}) or r.tail_name in ({placeholders}))
-                order by r.importance desc, r.confidence desc
-                limit ?
-            """
-            params = [space_id, *matched_names, *matched_names, limit]
-            rows = connection.execute(sql, params).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                select r.head_name as head_name, r.rel as rel, r.tail_name as tail_name,
-                       r.confidence as confidence, r.importance as importance
-                from kg_relation as r
-                where r.space_id = ? and r.is_active = 1
-                order by r.importance desc, r.confidence desc
-                limit ?
-                """,
-                (space_id, min(limit, 5)),
-            ).fetchall()
-
-        return [
-            f"{row['head_name']} {row['rel']} {row['tail_name']}"
-            f"（置信度 {float(row['confidence']):.2f}，重要性 {float(row['importance']):.2f}）"
-            for row in rows
-        ]
 
     def query_past_beliefs(
         self,
@@ -518,6 +517,7 @@ class KGStore:
             from kg_relation as r
             where r.space_id = ? and r.status in ('active', 'superseded')
               and (r.is_active = 1 or r.status = 'superseded')
+              and coalesce(r.lifecycle_state, 'active') != 'forgotten'
             order by r.importance desc, r.confidence desc
             limit ?
             """,
@@ -581,6 +581,7 @@ class KGStore:
                    r.update_ts as update_ts
             from kg_relation as r
             where r.space_id = ? and r.is_active = 0
+              and coalesce(r.lifecycle_state, 'active') != 'forgotten'
             order by r.update_ts desc
             limit 40
             """,

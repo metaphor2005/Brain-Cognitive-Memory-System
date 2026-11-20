@@ -61,6 +61,7 @@ import config
 settings = {}
 state_settings = settings
 
+from cognitive.cognition.lifecycle import LifecycleManager
 from cognitive.engine import CognitiveAgent
 from cognitive.llm import DeepSeekClient, LLMError
 from cognitive.persona.changelog import PersonaChangelogStore
@@ -813,6 +814,75 @@ def memory_overview():
     return jsonify({"ok": True, **get_agent().memory_overview(space_id)})
 
 
+# ------------------------------------------------------------
+# 记忆生命周期与遗忘
+# ------------------------------------------------------------
+@app.get("/api/memory/lifecycle")
+def memory_lifecycle():
+    """
+    生命周期观测：列出各单元的强度/状态，以及最近的状态变更事件。
+
+    query:
+        space_id?  默认 default
+        events?    事件条数（默认 100）
+    """
+    space_id = request.args.get("space_id") or "default"
+    limit = max(1, min(500, int(request.args.get("events") or 100)))
+    agent = get_agent()
+    agent.ensure_space(space_id)
+    manager = LifecycleManager(agent.db)
+    return jsonify(
+        {
+            "ok": True,
+            "items": manager.scan(space_id),
+            "events": manager.list_events(space_id, limit=limit),
+            "policy": {
+                "half_life_days": config.LIFECYCLE_HALF_LIFE_DAYS,
+                "decay_threshold": config.LIFECYCLE_DECAY_THRESHOLD,
+                "forget_threshold": config.LIFECYCLE_FORGET_THRESHOLD,
+                "min_age_days": config.LIFECYCLE_MIN_AGE_DAYS,
+                "importance_exempt": config.LIFECYCLE_IMPORTANCE_EXEMPT,
+                "enabled": config.LIFECYCLE_ENABLED,
+            },
+        }
+    )
+
+
+@app.post("/api/memory/lifecycle/forget")
+def memory_lifecycle_forget():
+    """
+    执行衰减与遗忘。默认 dry-run，不落库；显式传 apply=true 才真正执行。
+
+    body:
+        space_id?  默认 default
+        apply?     true 才实际写入状态变更（默认 false）
+    """
+    body = _body() or {}
+    space_id = str(body.get("space_id") or "default").strip() or "default"
+    apply = str(body.get("apply", "")).strip().lower() in ("1", "true", "yes")
+    agent = get_agent()
+    agent.ensure_space(space_id)
+    result = LifecycleManager(agent.db).forget(space_id, dry_run=not apply)
+    return jsonify({"ok": True, **result})
+
+
+@app.post("/api/memory/lifecycle/restore")
+def memory_lifecycle_restore():
+    """把一个已遗忘/衰减的单元恢复为 active（需要显式指定单元）。"""
+    body = _body() or {}
+    space_id = str(body.get("space_id") or "default").strip() or "default"
+    unit_type = str(body.get("unit_type") or "").strip()
+    unit_id = str(body.get("unit_id") or "").strip()
+    if not unit_type or not unit_id:
+        return _fail("缺少 unit_type 或 unit_id")
+    agent = get_agent()
+    agent.ensure_space(space_id)
+    restored = LifecycleManager(agent.db).restore(space_id, unit_type, unit_id)
+    if not restored:
+        return _fail("目标单元不存在或类型非法", 404)
+    return jsonify({"ok": True, "restored": True})
+
+
 @app.get("/api/relations")
 def relations():
     """信念（KG 关系）列表。query: ?all=1 含被推翻历史行"""
@@ -884,9 +954,11 @@ def memory_universe():
     conn = agent.db.conn()
     exp_rows = conn.execute(
         """
-        select exp_id, topic_id, content, create_ts
+        select exp_id, topic_id, content, create_ts,
+               coalesce(lifecycle_state, 'active') as lifecycle_state
         from experience
         where space_id = ?
+          and coalesce(lifecycle_state, 'active') != 'forgotten'
         order by create_ts desc
         limit ?
         """,
@@ -897,6 +969,7 @@ def memory_universe():
             "exp_id": row["exp_id"],
             "topic_id": row["topic_id"] or "",
             "content": row["content"] or "",
+            "lifecycle_state": row["lifecycle_state"],
             "create_ts": int(row["create_ts"] or 0),
         }
         for row in exp_rows
@@ -1293,32 +1366,31 @@ _scheduler_started = False
 
 
 def _proactive_loop() -> None:
-    """后台循环：定期扫描全部到期时间表，到点就让她主动发一条。"""
+    """后台循环：调用共享的到期兑现逻辑（与外部 worker 行为一致）。"""
+    from cognitive.proactive import run_due_once
+
     # 给 Web 服务一点启动时间，避免第一个请求还没进来就抢模型
     time.sleep(3)
     while True:
         try:
-            if config.PROACTIVE_ENABLED:
-                agent = get_agent()
-                # 不只服务 Web UI：开发者用 /api/chat 产生的排期同样会到点触发
-                due = ProactiveScheduleStore(agent.db).list_due(limit=10)
-                for row in due:
-                    report = agent.proactive_tick(
-                        row["space_id"], row["session_id"]
-                    )
-                    if report.get("sent"):
-                        content = (report.get("message") or {}).get("content", "")
-                        print(f"[主动消息] {content[:60]}")
+            for report in run_due_once(get_agent(), limit=10):
+                if report["sent"]:
+                    content = (report["message"] or {}).get("content", "")
+                    print(f"[主动消息] {content[:60]}")
         except Exception as exc:  # 调度失败不能拖垮 Web 服务
             print(f"[主动消息] 调度失败：{type(exc).__name__}: {exc}")
         time.sleep(max(5, int(config.PROACTIVE_TICK_SECONDS)))
 
 
 def _start_proactive_scheduler() -> None:
-    """启动后台调度线程（幂等；PROACTIVE_ENABLED=false 时不启动）。"""
+    """启动后台调度线程（幂等；关闭主动联系或改用外部 worker 时不启动）。"""
     global _scheduler_started
     with _scheduler_lock:
-        if _scheduler_started or not config.PROACTIVE_ENABLED:
+        if (
+            _scheduler_started
+            or not config.PROACTIVE_ENABLED
+            or not config.PROACTIVE_IN_PROCESS_SCHEDULER
+        ):
             return
         _scheduler_started = True
     threading.Thread(
@@ -1426,20 +1498,64 @@ def _apply_protection():
 
 
 _RATE_BUCKETS: Dict[str, list] = {}
+_RATE_LOCK = threading.Lock()
+
+# SQLite 限流器单例（仅 RATE_LIMIT_BACKEND=sqlite 时惰性创建）。
+# 单例必须按数据库路径缓存：测试里会换临时库，单例若写死第一个路径会串库。
+_SQLITE_LIMITERS: Dict[str, Any] = {}
+_SQLITE_LIMITERS_LOCK = threading.Lock()
+
+
+def _get_sqlite_limiter() -> Any:
+    """按当前配置的数据库路径取（或创建）共享限流器。"""
+    from cognitive.storage.rate_limit_store import SQLiteRateLimiter
+
+    path = str(config.RATE_LIMIT_DB_PATH)
+    with _SQLITE_LIMITERS_LOCK:
+        limiter = _SQLITE_LIMITERS.get(path)
+        if limiter is None:
+            limiter = SQLiteRateLimiter(config.RATE_LIMIT_DB_PATH)
+            _SQLITE_LIMITERS[path] = limiter
+        return limiter
+
+
+def _rate_limit(key: str, now: float, max_calls: int) -> bool:
+    """
+    滑动窗口限流：返回 True 表示允许，False 表示超限。
+
+    两种后端：
+    - memory（默认）：进程内 dict + 线程锁，单进程够用（抽成纯函数便于离线测试）；
+    - sqlite：写事务串行化，多进程 worker 共享同一额度，不引入 Redis。
+
+    用锁保护共享字典 —— Flask 多线程模式下，"检查-追加"必须是原子的，
+    否则并发请求会同时通过、超过上限。
+    """
+    if not max_calls or max_calls <= 0:
+        return True
+
+    if (config.RATE_LIMIT_BACKEND or "memory").strip().lower() == "sqlite":
+        return _get_sqlite_limiter().allow(key, now, max_calls)
+
+    with _RATE_LOCK:
+        bucket = [t for t in _RATE_BUCKETS.get(key, []) if now - t < 60]
+        if len(bucket) >= int(max_calls):
+            return False
+        bucket.append(now)
+        _RATE_BUCKETS[key] = bucket
+        # 顺手清理过期桶，避免长期运行后按来源 IP 无限增长
+        if len(_RATE_BUCKETS) > 1000:
+            stale = [k for k, v in _RATE_BUCKETS.items() if not any(now - t < 60 for t in v)]
+            for k in stale:
+                del _RATE_BUCKETS[k]
+    return True
 
 
 def _check_rate_limit():
     """简单滑动窗口限流：同一来源每分钟最多 RATE_LIMIT_MAX 次。"""
-    if not config.RATE_LIMIT_MAX or config.RATE_LIMIT_MAX <= 0:
-        return None
     key = request.remote_addr or "local"
-    now = time.time()
-    bucket = [t for t in _RATE_BUCKETS.get(key, []) if now - t < 60]
-    if len(bucket) >= int(config.RATE_LIMIT_MAX):
-        return _fail("请求过于频繁，请稍后再试", 429)
-    bucket.append(now)
-    _RATE_BUCKETS[key] = bucket
-    return None
+    if _rate_limit(key, time.time(), int(config.RATE_LIMIT_MAX or 0)):
+        return None
+    return _fail("请求过于频繁，请稍后再试", 429)
 
 
 # ------------------------------------------------------------

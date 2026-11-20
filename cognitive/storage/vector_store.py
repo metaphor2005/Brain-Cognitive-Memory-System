@@ -1,12 +1,16 @@
 """
-轻量向量存储（TF-IDF + 余弦相似度，纯本地、零外部服务）。
+轻量向量存储（默认 TF-IDF + 余弦相似度，纯本地、零外部服务）。
 
-为什么不用 chromadb / 外部 embedding：
+为什么默认不用 chromadb / 外部 embedding：
 - DeepSeek 未提供 embedding 接口；
 - 本地 embedding 模型体积大、首次下载不可控；
 - 记忆量级（几百到几千条主题摘要）用 TF-IDF 已足够，且完全可解释、可离线。
 
-切词策略：
+可选的 embedding 后端（VECTOR_BACKEND=embedding）：
+- 惰性导入第三方模型，默认仍关闭；缺依赖或加载失败自动回退 TF-IDF；
+- 对外只保留 VectorStore 的 add/search/count/has 四个方法，调用方无感。
+
+切词策略（仅 TF-IDF）：
 - 中文：字符 n-gram（默认 2-gram），无需分词库
 - 英文/数字：按单词切分并小写
 - 混合文本同时保留两种特征
@@ -63,10 +67,49 @@ def _term_counts(tokens: List[str]) -> Dict[str, int]:
     return counts
 
 
-class VectorStore:
-    """基于 TF-IDF 的向量检索（无外部依赖）。"""
+class _SentenceTransformerEmbedder:
+    """把 sentence-transformers 适配成 embed(texts) 接口。"""
 
-    def __init__(self, space_id: str) -> None:
+    def __init__(self, model: Any) -> None:
+        self.model = model
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        vectors = self.model.encode(texts, normalize_embeddings=True)
+        return [list(map(float, vec)) for vec in vectors]
+
+
+def _load_default_embedder() -> Any:
+    """
+    惰性导入本地 embedding 模型 —— 只有选了 embedding 后端才会执行。
+
+    这样默认安装完全不需要第三方依赖；缺依赖时抛异常，由 VectorStore 回退 TF-IDF。
+    """
+    from sentence_transformers import SentenceTransformer
+
+    return _SentenceTransformerEmbedder(SentenceTransformer(config.EMBEDDING_MODEL))
+
+
+def _cosine_dense(a: List[float], b: List[float]) -> float:
+    """两个稠密向量的余弦（假设已归一化，仍做一次防呆）。"""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+class VectorStore:
+    """向量检索 façade：默认 TF-IDF，可选本地 embedding（缺依赖自动回退）。"""
+
+    def __init__(
+        self, space_id: str, backend: Optional[str] = None, embedder: Any = None
+    ) -> None:
+        """
+        :param space_id: 记忆空间
+        :param backend: 覆盖 config.VECTOR_BACKEND（测试可注入）
+        :param embedder: 自定义 embedder（需实现 embed(texts)->list[list[float]]）
+        """
         self.space_id = space_id
         self.path = config.VECTOR_DIR / f"{space_id}.json"
         # 全新安装时 data/vectors/ 可能还不存在：这里主动创建，
@@ -78,7 +121,28 @@ class VectorStore:
         self._idf_cache: Dict[str, float] = {}
         self._idf_cache_ts = 0  # IDF缓存时间戳
         self._idf_cache_ttl = 300  # IDF缓存有效期（秒）
+
+        requested = (backend or config.VECTOR_BACKEND or "tfidf").strip().lower()
+        self.backend = requested
+        self._embedder: Any = None
+        if requested == "embedding":
+            try:
+                self._embedder = embedder or _load_default_embedder()
+            except Exception as exc:  # 缺依赖 / 模型加载失败 → 静默回退
+                print(f"[向量] embedding 后端不可用，回退 TF-IDF：{exc}")
+                self.backend = "tfidf"
+
         self._load()
+        # 切换后端时旧索引缺对应表示，自动重算一次，避免静默检索为空
+        if self._docs:
+            if self.backend == "embedding" and any(
+                "vector" not in doc for doc in self._docs
+            ):
+                self.reindex()
+            elif self.backend == "tfidf" and any(
+                "counts" not in doc for doc in self._docs
+            ):
+                self.reindex()
 
     # ------------------------------------------------------------
     # 持久化
@@ -97,7 +161,12 @@ class VectorStore:
 
     def _save(self) -> None:
         """写回磁盘（原子替换，避免写入中断导致索引损坏）。"""
-        payload = {"space_id": self.space_id, "docs": self._docs}
+        payload = {
+            "space_id": self.space_id,
+            "backend": self.backend,
+            "version": 2,
+            "docs": self._docs,
+        }
         temp_path = self.path.with_suffix(".tmp")
         with open(temp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False))
@@ -116,20 +185,17 @@ class VectorStore:
         :param text: 用于检索的文本（通常是主题标题 + 摘要 + 关键词）
         :param meta: 附带的元数据
         """
-        counts = _term_counts(
-            tokenize(f"{text} {' '.join((meta or {}).get('keywords', []))}")
-        )
+        keywords = (meta or {}).get("keywords", []) or []
+        indexed_text = f"{text} {' '.join(str(k) for k in keywords)}"
+        record: Dict[str, Any] = {"id": doc_id, "text": text, "meta": meta or {}}
+        if self.backend == "embedding":
+            record["vector"] = self._embedder.embed([indexed_text])[0]
+        else:
+            record["counts"] = _term_counts(tokenize(indexed_text))
 
         # 已存在同 id 时先移除，保证覆盖语义
         self._docs = [d for d in self._docs if d.get("id") != doc_id]
-        self._docs.append(
-            {
-                "id": doc_id,
-                "text": text,
-                "meta": meta or {},
-                "counts": counts,
-            }
-        )
+        self._docs.append(record)
         self._save()
         # 文档集变了，IDF 缓存立即失效，避免新文档在 TTL 窗口内检索不到
         self._idf_cache_ts = 0
@@ -272,6 +338,9 @@ class VectorStore:
         if not query or not self._docs:
             return []
 
+        if self.backend == "embedding":
+            return self._search_embedding(query, top_k, min_score)
+
         hints = expand_terms(query) if config.VECTOR_EXPAND_ENABLED else []
         idf = self._idf()
         query_vec = self._query_vector(query, idf)
@@ -289,6 +358,44 @@ class VectorStore:
 
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[:top_k]
+
+    def _search_embedding(
+        self, query: str, top_k: int, min_score: float
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """embedding 后端的检索：稠密余弦 + 关键词加成（阈值语义与 TF-IDF 一致）。"""
+        hints = expand_terms(query) if config.VECTOR_EXPAND_ENABLED else []
+        query_vec = self._embedder.embed([query])[0]
+        scored: List[Tuple[str, float, Dict[str, Any]]] = []
+        for doc in self._docs:
+            vector = doc.get("vector") or []
+            if not vector:
+                continue
+            cosine = _cosine_dense(query_vec, vector)
+            boost = self._keyword_boost(query, doc.get("meta", {}), hints)
+            if cosine < min_score and boost <= 0:
+                continue
+            scored.append((doc["id"], min(1.0, cosine + boost), doc.get("meta", {})))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:top_k]
+
+    def reindex(self) -> None:
+        """按当前后端重算全部文档向量（切换后端或升级索引格式后调用）。"""
+        if self.backend == "embedding":
+            texts = []
+            for doc in self._docs:
+                keywords = (doc.get("meta") or {}).get("keywords", []) or []
+                texts.append(f"{doc.get('text', '')} {' '.join(str(k) for k in keywords)}")
+            for doc, vector in zip(self._docs, self._embedder.embed(texts)):
+                doc["vector"] = vector
+        else:
+            # 从 embedding 切回 TF-IDF：把 counts 补回来，否则 _idf() 会算空
+            for doc in self._docs:
+                if "counts" not in doc:
+                    keywords = (doc.get("meta") or {}).get("keywords", []) or []
+                    text = f"{doc.get('text', '')} {' '.join(str(k) for k in keywords)}"
+                    doc["counts"] = _term_counts(tokenize(text))
+            self._idf_cache_ts = 0
+        self._save()
 
     def count(self) -> int:
         """返回索引中的文档数量。"""

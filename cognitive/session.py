@@ -123,14 +123,15 @@ class SessionManager:
         self.save(context)
         return context
 
-    def save(self, context: SessionContext) -> None:
+    def save(self, context: SessionContext, now: Optional[int] = None) -> None:
         """
         双写：更新内存 + 立刻落库。
 
         :param context: 会话对象
+        :param now: 时间戳（Unix 秒），仅用于离线测试的时钟注入；缺省用真实时钟
         """
         self._memory[context.session_id] = context
-        context.update_ts = int(time.time())
+        context.update_ts = int(now) if now is not None else int(time.time())
 
         connection = self.db.conn()
         connection.execute(
@@ -157,6 +158,7 @@ class SessionManager:
         role: str,
         content: str,
         turn_id: str = "",
+        now: Optional[int] = None,
     ) -> None:
         """
         追加一条消息并立即持久化。
@@ -165,9 +167,10 @@ class SessionManager:
         :param role: 角色
         :param content: 正文
         :param turn_id: 本轮轮次标识（同一轮的用户消息与全部回复气泡共用）
+        :param now: 时间戳（Unix 秒），仅用于离线测试的时钟注入；缺省用真实时钟
         """
-        context.append(role, content, turn_id=turn_id)
-        self.save(context)
+        context.append(role, content, turn_id=turn_id, now=now)
+        self.save(context, now=now)
 
     # ------------------------------------------------------------
     # token 统计
@@ -187,11 +190,12 @@ class SessionManager:
     # ------------------------------------------------------------
     # 兜底压缩
     # ------------------------------------------------------------
-    def maybe_compress(self, context: SessionContext) -> Dict[str, object]:
+    def maybe_compress(self, context: SessionContext, now: Optional[int] = None) -> Dict[str, object]:
         """
         判断并按需执行兜底压缩。
 
         :param context: 会话对象
+        :param now: 时间戳（Unix 秒），仅用于离线测试的时钟注入；缺省用真实时钟
         :return: 压缩报告 {"triggered": bool, "before": int, "after": int, "passes": int}
         """
         before = self.count_tokens(context)
@@ -235,7 +239,7 @@ class SessionManager:
 
         report["passes"] = passes
         report["after"] = self.count_tokens(context)
-        self.save(context)
+        self.save(context, now=now)
         return report
 
     def _compress_once(self, context: SessionContext) -> bool:

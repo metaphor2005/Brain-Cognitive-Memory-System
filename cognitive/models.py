@@ -81,18 +81,20 @@ class SessionContext:
     create_ts: int = field(default_factory=_now)
     update_ts: int = field(default_factory=_now)
 
-    def append(self, role: str, content: str, turn_id: str = "") -> Message:
+    def append(self, role: str, content: str, turn_id: str = "", now: Optional[int] = None) -> Message:
         """
         追加一条消息并刷新更新时间。
 
         :param role: 角色
         :param content: 正文
         :param turn_id: 所属轮次标识（同一轮的多个气泡共享同一个值）
+        :param now: 时间戳（Unix 秒），仅用于离线测试的时钟注入；缺省用真实时钟
         :return: 新建的消息对象
         """
-        msg = Message(role=role, content=content, turn_id=turn_id)
+        ts = int(now) if now is not None else _now()
+        msg = Message(role=role, content=content, turn_id=turn_id, ts=ts)
         self.messages.append(msg)
-        self.update_ts = _now()
+        self.update_ts = ts
         return msg
 
     def recent_text(self, rounds: Optional[int] = None, max_chars: int = 2000) -> str:
@@ -158,6 +160,9 @@ class Topic:
     consolidated: bool = False    # 是否已被上一层（日结）归并
     is_big_event: bool = False    # 是否被判定为大事
     turn_id: str = ""             # 来源轮次（归档幂等的依据：同一轮只归档一次）
+    # 生命周期：active / candidate / archived / forgotten（见 lifecycle.py）
+    lifecycle_state: str = "active"
+    last_access_ts: int = 0       # 最近一次被召回的时间（遗忘策略的输入）
     create_ts: int = field(default_factory=_now)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -173,6 +178,8 @@ class Experience:
     space_id: str
     topic_id: str
     content: str
+    lifecycle_state: str = "active"
+    last_access_ts: int = 0
     create_ts: int = field(default_factory=_now)
 
 
@@ -232,6 +239,10 @@ class KGRelation:
     valid_from: int = 0
     valid_to: int = 0
     user_confirmed: bool = False
+    # 生命周期状态独立于 status：status 记"信念真假"（active/superseded/rejected），
+    # lifecycle_state 记"这段记忆是否还在认知里"（active/candidate/archived/forgotten）
+    lifecycle_state: str = "active"
+    last_access_ts: int = 0
     create_ts: int = field(default_factory=_now)
     update_ts: int = field(default_factory=_now)
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import List
 
+from cognitive.cognition.lifecycle import LifecycleManager, STATE_FORGOTTEN
 from cognitive.models import RetrievedMemory, Topic
 from cognitive.persona.seed import SEED_SESSION_ID
 from cognitive.storage.database import Database
@@ -71,10 +72,23 @@ class MemoryRouter:
             # 本身就是可召回的成品记忆，必须保留（否则 demo 的"前史召回"全灭）。
             if topic.consolidated and topic.session_id != SEED_SESSION_ID:
                 continue
+            # 已遗忘的主题退出日常认知（审计/导出仍可通过 include_forgotten 取回）
+            if topic.lifecycle_state == STATE_FORGOTTEN:
+                continue
             topics.append(topic)
             experiences.extend(topics_store.get_experiences_by_topic(space_id, topic_id))
 
         result.topics = topics
         result.experiences = experiences
+
+        # 召回记账：成功与否都不影响本次回答（生命周期是旁路观测）
+        try:
+            LifecycleManager(self.db).touch_recall(
+                space_id,
+                query,
+                topic_ids=[t.topic_id for t in topics],
+            )
+        except Exception:
+            pass
 
         return result

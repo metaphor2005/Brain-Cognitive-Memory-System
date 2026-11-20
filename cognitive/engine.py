@@ -26,13 +26,18 @@ import config
 from cognitive.cognition.archiver import MemoryArchiver
 from cognitive.cognition.consolidator import Consolidator
 from cognitive.cognition.judge import InfoJudge
-from cognitive.cognition.prompts import build_answer_messages, render_persona_profile
+from cognitive.cognition.prompts import (
+    AFFECTION_TIER_PROMPT_DESC,
+    build_answer_messages,
+    render_persona_profile,
+    render_reunion_block,
+)
 from cognitive.cognition.rag import RAGRegistry
 from cognitive.cognition.router import MemoryRouter
 from cognitive.llm import DeepSeekClient, LLMError, get_client
-from cognitive.models import PersonaSnapshot, RetrievedMemory, SessionContext
+from cognitive.models import PersonaSnapshot, RetrievedMemory, SessionContext, new_id
 from cognitive.persona.changelog import PersonaChangelogStore
-from cognitive.persona.kernel import PersonaKernel
+from cognitive.persona.kernel import PersonaKernel, render_emotion_block
 from cognitive.persona.snapshot import PersonaSnapshotStore
 from cognitive.proactive import ProactiveInitiator
 from cognitive.session import SessionManager
@@ -41,6 +46,7 @@ from cognitive.storage.affection_store import (
     ProactiveOutbox,
     ProactivePolicyStore,
     ProactiveScheduleStore,
+    phrasing_tier,
 )
 from cognitive.storage.database import Database
 from cognitive.storage.kg_store import KGStore
@@ -197,6 +203,7 @@ class CognitiveAgent:
         session_id: str,
         space_id: str = "default",
         verbose: bool = False,
+        now: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         处理一轮用户输入。
@@ -205,10 +212,13 @@ class CognitiveAgent:
         :param session_id: 会话 id
         :param space_id: 记忆空间 id
         :param verbose: 是否在返回值里附带详细链路信息
+        :param now: 当前时刻（Unix 秒），仅用于离线测试的时钟注入；缺省用真实时钟
         :return: {"answer": str, "answer_parts": [str], "debug": dict,
                   "proactive_messages": [dict]}
         """
         started_at = time.time()
+        # 时钟注入：缺省用真实时钟；一旦给定，本轮所有写入都用它，保证测试确定性
+        now_ts = int(now) if now is not None else int(time.time())
         self.ensure_space(space_id)
 
         # ---------- 本轮轮次标识（P0：归档幂等依赖轮次，同一轮只沉淀一次） ----------
@@ -239,10 +249,22 @@ class CognitiveAgent:
 
         # ---------- 步骤 1-2：加载会话并追加用户消息 ----------
         context = self.sessions.get_or_create(session_id, space_id)
-        self.sessions.append(context, "user", user_message, turn_id=turn_id)
+        # 重逢：必须在追加本轮消息之前抓"上次"的锚点——append 会刷新会话。
+        # 用最后一条历史消息的 ts/turn_id，而不是 context.update_ts：
+        #   - ts 才是"上一条消息真正发出的时刻"，且不受压缩路径 save() 刷写 update_ts 影响；
+        #   - turn_id 用来按真实归档记录取"上次聊的话题"，绝不能拿当前召回的话题冒充。
+        # 新会话没有历史消息 → 不触发重逢。
+        if context.messages:
+            last_msg = context.messages[-1]
+            last_ts = last_msg.ts
+            last_turn_id = last_msg.turn_id
+        else:
+            last_ts = None
+            last_turn_id = ""
+        self.sessions.append(context, "user", user_message, turn_id=turn_id, now=now_ts)
 
         # ---------- 步骤 3：token 统计与兜底压缩 ----------
-        compress_report = self.sessions.maybe_compress(context)
+        compress_report = self.sessions.maybe_compress(context, now=now_ts)
         debug["compress"] = compress_report
 
         # ---------- 步骤 4：读取人格状态 ----------
@@ -251,6 +273,14 @@ class CognitiveAgent:
         # 自我认知取"即时层"：日内可以微调，版本号仍由日结推进
         live_self_view = snapshots.current_self_view()
         tendency = kernel.describe()
+        # 情绪独立成块：把"此刻心里的事"翻译成具体措辞，模型才知道怎么变语气。
+        # 与记忆路由同级——情绪是增强项，一条脏 mood 不该让整轮对话崩掉。
+        try:
+            emotion_block = render_emotion_block(kernel.get_moods())
+        except Exception as exc:
+            emotion_block = ""
+            debug["error"] = f"情绪区块降级：{type(exc).__name__}: {exc}"
+        debug["emotion_block"] = bool(emotion_block)
         core_beliefs = kg.query_core_beliefs(space_id)
         debug["persona_version"] = snapshot.version
 
@@ -270,6 +300,23 @@ class CognitiveAgent:
         }
         # 记忆区块（人格变迁史会前置注入；过去值已由 RetrievedMemory.to_prompt_block 渲染）
         memory_block = memory.to_prompt_block()
+
+        # ---------- 步骤 5b：久别重逢的时间背景 ----------
+        # 只描述"多久没见"，不自动发消息、不改任何状态；交给模型自然带到语气里。
+        # "上次聊的话题"必须来自上一轮真实归档记录（按 turn_id 查），查不到就不带——
+        # 绝不能用本轮向量召回的话题冒充，否则等于向模型断言一个假的"上次"，
+        # 直接违反思考纪律第 7 条"不要编造"。
+        try:
+            last_topic = ""
+            if last_turn_id:
+                prior_topic = TopicStore(self.db).get_topic_by_turn(space_id, last_turn_id)
+                if prior_topic:
+                    last_topic = prior_topic.title
+            reunion_block = render_reunion_block(last_ts, now_ts, last_topic_title=last_topic)
+        except Exception as exc:
+            reunion_block = ""
+            debug["error"] = f"重逢区块降级：{type(exc).__name__}: {exc}"
+        debug["reunion"] = bool(reunion_block)
 
         # ---------- 步骤 6：自我溯源增强 ----------
         if self._is_self_inquiry(user_message):
@@ -311,16 +358,18 @@ class CognitiveAgent:
                 memory_block = f"{self_view_block}\n\n{memory_block}"
 
         # ---------- 记忆规模上限：超过则停止向量召回并标记（避免内存膨胀拖慢运行） ----------
+        # 用公开 count() 而不是私有 _docs：换 embedding 后端后内部不再有该字段
+        vector_count = VectorStore(space_id).count()
         if (
             len(memory.rag_snippets) >= config.MEMORY_MAX_VECTORS
-            or len(VectorStore(space_id)._docs) > config.MEMORY_CAP_NORMAL
+            or vector_count > config.MEMORY_CAP_NORMAL
         ):
             memory.rag_snippets = []
             memory.rag_used = False
             memory.capped = True
             debug["memory_cap"] = {
                 "capped": True,
-                "vector_count": len(VectorStore(space_id)._docs),
+                "vector_count": vector_count,
             }
 
         # ---------- 步骤 7b：关系温度注入 ----------
@@ -345,6 +394,8 @@ class CognitiveAgent:
             compressed_summary=context.compressed_summary,
             user_message=user_message,
             rag_loop_note=loop["note"],
+            emotion_block=emotion_block,
+            reunion_block=reunion_block,
         )
 
         # 插入最近若干轮原始对话（不含本轮，本轮已由 user_content 承载）
@@ -366,7 +417,7 @@ class CognitiveAgent:
         except LLMError as exc:
             # 回答失败：回滚本轮用户消息，避免污染上下文
             context.messages = context.messages[:-1]
-            self.sessions.save(context)
+            self.sessions.save(context, now=now_ts)
             debug["error"] = str(exc)
             # 明确标记"未归档"，避免外部误读为归档本身出错
             debug["archive"] = {
@@ -401,7 +452,7 @@ class CognitiveAgent:
         # session_store 存多条 assistant 消息，历史加载时直接还原成多个气泡。
         answer_parts = split_reply(answer)
         for part in answer_parts:
-            self.sessions.append(context, "assistant", part, turn_id=turn_id)
+            self.sessions.append(context, "assistant", part, turn_id=turn_id, now=now_ts)
 
         # ---------- 步骤 10：主动归档 ----------
         if config.ARCHIVE_SYNC:
@@ -423,8 +474,9 @@ class CognitiveAgent:
         ):
             reason = archive_report.get("big_event_reason") or ""
             try:
-                # 避免循环依赖：直接使用TopicStore和Consolidator，而不是通过self
-                from cognitive.storage.topic_store import TopicStore
+                # 避免循环依赖：直接使用 Consolidator，而不是通过 self。
+                # 注意：TopicStore 已在模块顶部导入，这里若再局部 import 会让它在
+                # 整个 chat() 里变成局部变量，遮蔽顶部导入（重逢区块在此之前的调用会 UnboundLocalError）。
                 from cognitive.cognition.consolidator import Consolidator
 
                 topic = TopicStore(self.db).get_topic(
@@ -881,11 +933,17 @@ class CognitiveAgent:
             "cold": "最近关系冷淡",
             "broken": "已经断绝来往",
         }
-        lines = [
-            f"· {row['person_name']}：好感度 {row['value']:.0f}/100，"
-            f"{status_desc.get(row['status'], '关系尚可')}"
-            for row in selected
-        ]
+        lines = []
+        for row in selected:
+            tier = phrasing_tier(row["value"], row["status"])
+            desc = (
+                AFFECTION_TIER_PROMPT_DESC.get(tier, "")
+                if tier
+                else status_desc.get(row["status"], "关系尚可")
+            )
+            lines.append(
+                f"· {row['person_name']}：好感度 {row['value']:.0f}/100，{desc}"
+            )
         return (
             "【你对相关人的当前感受（关系温度）】\n"
             + "\n".join(lines)
